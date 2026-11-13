@@ -1,0 +1,138 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Job Application Agent – Docker Compose stack
+#
+# Services
+#   app      – the agent (Python + Playwright + Xvfb + noVNC + Streamlit)
+#   ollama   – local embeddings, free, runs on CPU (or GPU if available)
+#   mailpit  – fake SMTP inbox for email-verification tests  [profile: dev]
+#
+# Quick start
+#   cp .env.example .env        # fill in your API keys
+#   docker compose build
+#   docker compose up -d
+#   docker compose exec ollama ollama pull nomic-embed-text
+#   docker compose exec app jobagent profile import
+#
+# Dashboard  → http://localhost:8501
+# Live view  → http://localhost:6080/vnc.html
+# Ollama API → http://localhost:11434
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Job application agent ──────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Tag the image so `docker compose run` reuses it without rebuilding
+    image: jobagent:latest
+    container_name: jobagent
+    hostname: jobagent
+
+    ports:
+      - "8501:8501"   # Streamlit dashboard
+      - "6080:6080"   # noVNC live browser view
+
+    volumes:
+      # Persistent data: DB, profiles, applications, secrets, browser profiles
+      # Stored on the host so they survive container restarts.
+      - ./data:/app/data
+
+      # Config YAMLs: mounted so you can edit them on the host without rebuilding
+      - ./config:/app/config
+
+      # Source code: mounted so Python changes take effect immediately —
+      # no rebuild needed for .py edits. The image still carries the initial
+      # copy, so a fresh `docker compose up` works even without this mount.
+      - ./src:/app/src
+
+      # scripts/ mounted so daily_run.sh and install_schedule.py stay in sync
+      - ./scripts:/app/scripts
+
+      # Master resume: read-only. RESUME_DIR defaults to ~/Documents/resume.
+      # Override in .env:  RESUME_DIR=/path/to/your/resume/folder
+      - ${RESUME_DIR:-~/Documents/resume}:/resume:ro
+
+    environment:
+      # Point to the Compose-internal ollama service
+      JOBAGENT_OLLAMA_BASE_URL: http://ollama:11434
+      # Resume is always at this path inside the container
+      JOBAGENT_PROFILE_SOURCE: /resume/master_resume.txt
+
+    # All other JOBAGENT_* vars (API keys, tokens) come from .env
+    env_file:
+      - .env
+
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+    restart: unless-stopped
+    networks:
+      - jobagent
+
+    # Security: drop capabilities not needed for browser automation
+    cap_add:
+      - SYS_ADMIN    # required by Chromium sandbox (--no-sandbox avoids this but reduces security)
+    security_opt:
+      - seccomp:unconfined   # Chromium needs several syscalls not in the default seccomp profile
+
+  # ── Ollama (local embeddings) ──────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: jobagent-ollama
+    hostname: ollama
+
+    ports:
+      - "11434:11434"   # exposed to host so you can also run `ollama` commands locally
+
+    volumes:
+      - ollama_models:/root/.ollama   # model weights persist between restarts
+
+    environment:
+      OLLAMA_ORIGINS: "*"             # allow cross-origin requests from the app
+
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s   # give ollama time to start before the first check
+
+    restart: unless-stopped
+    networks:
+      - jobagent
+
+  # ── Mailpit (fake SMTP for email-verification tests) ──────────────────────
+  # Only started when you explicitly pass the dev profile:
+  #   docker compose --profile dev up
+  # or:  make up-dev
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: jobagent-mailpit
+
+    ports:
+      - "8025:8025"   # web UI  → http://localhost:8025
+      - "1025:1025"   # SMTP
+
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+
+    networks:
+      - jobagent
+
+    profiles:
+      - dev            # not started by default; start with --profile dev
+
+# ── Networks ───────────────────────────────────────────────────────────────────
+networks:
+  jobagent:
+    driver: bridge
+
+# ── Named volumes ──────────────────────────────────────────────────────────────
+volumes:
+  ollama_models:
+    # Ollama model weights stored in a Docker-managed volume (not bind-mounted)
+    # so they survive `docker compose down` but not `docker compose down -v`.

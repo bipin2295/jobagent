@@ -1,0 +1,143 @@
+titles:
+  - "senior data engineer"
+  - "lead data engineer"
+  - "staff data engineer"
+  - "senior analytics engineer"
+  - "lead analytics engineer"
+  - "data platform engineer"
+  - "data engineer"
+  - "analytics engineer"
+
+must_have_any: [sql, python, dbt, snowflake, spark, airflow, databricks, bigquery]
+
+exclude_titles:
+  - intern
+  - junior
+  - graduate
+  - "data entry"
+  - "sales engineer"
+  - "solutions engineer"
+  - "machine learning engineer"
+
+seniority: [senior, lead, staff]
+
+max_age_days: 21
+
+regions:
+  india:
+    countries: [IN]
+    cities: [Bengaluru, Hyderabad, Pune, Gurugram, Mumbai, Chennai, Remote]
+    modes: [onsite, hybrid, remote]
+  remote:
+    modes: [remote]
+    allowed_timezones: "UTC-1..UTC+12"
+  eu:
+    countries: [DE, NL, IE, LU, SE, DK, FI, AT, BE, FR, ES, PT, PL, IT,
+                CZ, EE, LT, SI, CY, MT, HU, RO, BG, HR, SK, LV, GR]
+    visa_policy: strict
+    require_relocation: preferred
+  uk_eea:
+    countries: [GB, CH, "NO", IS]  # NO must be quoted — bare NO is a YAML boolean
+    visa_policy: strict
+    require_relocation: preferred
+  me:
+    countries: [AE, SA, QA]
+    visa_policy: lenient
+    require_relocation: preferred
+  apac:
+    countries: [SG, AU, NZ, JP, HK]
+    visa_policy: strict
+    require_relocation: preferred
+  sea:
+    countries: [MY, TH, VN]
+    visa_policy: lenient
+    require_relocation: preferred
+  canada:
+    countries: [CA]
+    visa_policy: lenient   # Express Entry / Global Talent Stream easier than US H-1B
+    require_relocation: preferred
+    notes: >
+      Canada runs a Global Talent Stream (GTS) for tech workers — 2-week
+      processing, employer-driven. Far more accessible than US H-1B.
+      Target cities: Toronto, Vancouver, Montreal, Ottawa, Waterloo.
+
+# ── Country allowlist ────────────────────────────────────────────────────────
+# Jobs whose detected country is NOT in this list are rejected BEFORE enrichment
+# so they don't waste LLM tokens. 'null' (unknown country) always passes through.
+# US is intentionally excluded — H-1B lottery makes it impractical.
+country_allowlist:
+  - IN   # India
+  - DE   # Germany
+  - NL   # Netherlands
+  - IE   # Ireland
+  - LU   # Luxembourg
+  - SE   # Sweden
+  - DK   # Denmark
+  - FI   # Finland
+  - AT   # Austria
+  - BE   # Belgium
+  - FR   # France
+  - ES   # Spain
+  - PT   # Portugal
+  - PL   # Poland
+  - IT   # Italy
+  - CZ   # Czech Republic
+  - EE   # Estonia
+  - LT   # Lithuania
+  - SI   # Slovenia
+  - CY   # Cyprus
+  - MT   # Malta
+  - HU   # Hungary
+  - RO   # Romania
+  - BG   # Bulgaria
+  - HR   # Croatia
+  - SK   # Slovakia
+  - LV   # Latvia
+  - GR   # Greece
+  - GB   # United Kingdom
+  - CH   # Switzerland
+  - "NO" # Norway (quoted — bare NO is YAML boolean)
+  - IS   # Iceland
+  - AE   # UAE
+  - SA   # Saudi Arabia
+  - QA   # Qatar
+  - SG   # Singapore
+  - AU   # Australia
+  - NZ   # New Zealand
+  - JP   # Japan
+  - HK   # Hong Kong
+  - MY   # Malaysia
+  - TH   # Thailand
+  - VN   # Vietnam
+  - CA   # Canada  ← added
+
+language_requirements:
+  reject_if_required:
+    - German
+    - Dutch
+    - French
+    - Arabic
+    - Swedish
+    - Danish
+    - Finnish
+    - Norwegian
+    - Icelandic
+    - Polish
+    - Italian
+    - Spanish
+    - Portuguese
+    - Czech
+    - Hungarian
+    - Romanian
+    - Greek
+    - Japanese
+    - Korean
+    - Mandarin
+    - Thai
+    - Vietnamese
+    - Malay
+
+salary_filter:
+  source: answers_seed.yaml
+
+run_mode: manual

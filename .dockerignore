@@ -1,0 +1,56 @@
+# ── Python artifacts ──────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.dist-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+
+# ── Test / lint artifacts ──────────────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ── Local data (NEVER bake personal data into the image) ──────────────────────
+data/
+*.db
+*.sqlite
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Version control ───────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── Editor / OS ───────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# ── Docs / plan (not needed in the image) ─────────────────────────────────────
+PLAN.md
+*.md
+!README.md
+
+# ── Docker config dirs (not needed inside the image itself) ───────────────────
+docker/langfuse/
+docker/mailpit/
+
+# ── Tests (not needed at runtime) ─────────────────────────────────────────────
+tests/

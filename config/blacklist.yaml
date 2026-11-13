@@ -1,0 +1,21 @@
+# Companies the agent must never apply to.
+# Matching: normalised company name (exact or alias) OR careers/apply-URL domain.
+# Plain "Vista" is NOT matched by name alone (avoids Vista Equity Partners, Vista Outdoor, etc.),
+# only via the domains below.
+companies:
+  - name: Cimpress
+    aliases: [Cimpress plc, Cimpress N.V., Cimpress India]
+    domains: [cimpress.com, careers.cimpress.com]
+  - name: Vistaprint
+    aliases: [Vista, VistaPrint, Vista (Vistaprint), Vistaprint India]
+    alias_requires_domain_match: [Vista]
+    domains: [vista.com, vistaprint.com, careers.vistaprint.com, careers.vista.com]
+
+# Cimpress-group brands. Uncomment to block.
+#  - { name: National Pen,     domains: [pens.com, nationalpen.com] }
+#  - { name: BuildASign,       domains: [buildasign.com] }
+#  - { name: Pixartprinting,   domains: [pixartprinting.com] }
+#  - { name: Drukwerkdeal,     domains: [drukwerkdeal.nl] }
+#  - { name: Exaprint,         domains: [exaprint.fr] }
+#  - { name: WIRmachenDRUCK,   domains: [wir-machen-druck.de] }
+#  - { name: 99designs,        domains: [99designs.com] }

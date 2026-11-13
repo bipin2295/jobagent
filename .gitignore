@@ -1,0 +1,13 @@
+# Personal data, credentials, browser profiles, DB: never commit
+data/
+.env
+*.db
+*.sqlite
+__pycache__/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store

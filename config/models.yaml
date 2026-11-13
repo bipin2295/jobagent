@@ -1,0 +1,93 @@
+# Task → model mapping for the Cimpress AI Gateway (Portkey).
+# Base URL: https://gateway.ai.cimpress.io/v1
+# API key:  JOBAGENT_PORTKEY_API_KEY in .env
+#
+# IMPORTANT: use the internal `id` from the gateway wellknown document, NOT
+# the display name.  The id is the value after → in this table:
+#
+#   eu.anthropic.claude-sonnet-5-5   → @Anthropic/eu.anthropic.claude-sonnet-5-5
+#   eu.anthropic.claude-haiku-5-5    → @Anthropic/eu.anthropic.claude-haiku-5-5
+#   eu.anthropic.claude-opus-5-5     → @Anthropic/eu.anthropic.claude-opus-5-5
+#   zai.glm-5.3-flash                → @valar-anthropic-direct/zai-org/GLM-5.3-Flash
+#   deepseek.v4.1-flash-1017         → @recommended/deepseek-ai/DeepSeek-V4.1-Flash-1017
+#   gpt-5.6-luna                     → @OpenAI/gpt-5.6-luna
+#   valar-auto (auto-router)         → @valar-code/valar-auto
+
+# ── Cheap / fast tasks (high volume) ─────────────────────────────────────────
+# DeepSeek V4.1 Flash: fast, vision-capable, $0.26 input / $1.02 output per 1M
+
+tasks:
+  jd_extraction:
+    model: "@recommended/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    max_tokens: 2000
+    temperature: 0.1
+
+  scoring:
+    model: "@recommended/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    max_tokens: 1000
+    temperature: 0.1
+
+  email_classification:
+    model: "@recommended/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    max_tokens: 500
+    temperature: 0.0
+
+  form_field_mapping:
+    model: "@recommended/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    max_tokens: 1000
+    temperature: 0.0
+
+  page_classify:
+    model: "@recommended/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    max_tokens: 200
+    temperature: 0.0
+
+  otp_extraction:
+    model: "@recommended/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    max_tokens: 200
+    temperature: 0.0
+
+# ── Strong tasks (resume quality, cover letters) ──────────────────────────────
+# Claude Sonnet 5-5 (EU-hosted, GDPR-safe)
+
+  tailoring_plan:
+    model: "@Anthropic/eu.anthropic.claude-sonnet-5-5"
+    max_tokens: 4000
+    temperature: 0.3
+
+  resume_rewrite:
+    model: "@Anthropic/eu.anthropic.claude-sonnet-5-5"
+    max_tokens: 4000
+    temperature: 0.3
+
+  cover_letter:
+    model: "@Anthropic/eu.anthropic.claude-sonnet-5-5"
+    max_tokens: 2000
+    temperature: 0.4
+
+  # Fact-check uses a DIFFERENT model from the writer for independent judgment
+  fact_check:
+    model: "@recommended/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    max_tokens: 2000
+    temperature: 0.0
+
+# ── Browser agent (vision-capable, sees screenshots) ─────────────────────────
+
+  browser_agent:
+    model: "@Anthropic/eu.anthropic.claude-sonnet-5-5"
+    max_tokens: 8000
+    temperature: 0.1
+    vision: true
+
+  pre_submit_verifier:
+    model: "@recommended/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    max_tokens: 1000
+    temperature: 0.0
+    vision: true
+
+# ── Embeddings (local Ollama, free) ──────────────────────────────────────────
+embedding:
+  provider: ollama
+  model: nomic-embed-text
+  base_url: "http://ollama:11434"   # Docker service name; use http://localhost:11434 outside Docker
+  dimensions: 768

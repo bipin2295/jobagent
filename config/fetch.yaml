@@ -1,0 +1,37 @@
+# Scraping backend routing. "native" means no paid service.
+# Paid fallbacks (apify, firecrawl) are only used when native fails.
+
+default_backend: native
+
+sources:
+  # ATS APIs: free public JSON — no scraping needed
+  greenhouse:    native
+  lever:         native
+  ashby:         native
+  smartrecruiters: native
+  workable:      native
+  workday:       native
+  mycareersfuture: native
+
+  # Aggregators: native via JobSpy / feedparser first, apify actor as fallback
+  linkedin:    { primary: native_jobspy, fallback: apify, apify_actor: "apify/linkedin-jobs-scraper" }
+  indeed:      { primary: native_jobspy, fallback: apify, apify_actor: "misceres/indeed-scraper" }
+  seek:        { primary: native,        fallback: apify, apify_actor: "apify/seek-com-scraper" }
+  naukri:      { primary: native_jobspy, fallback: apify }
+  glassdoor:   { primary: native_jobspy, fallback: apify }
+
+  # Unknown company career pages: Playwright first, Firecrawl as fallback for JS-heavy sites
+  unknown_career_page: { primary: native_playwright, fallback: firecrawl }
+
+budgets:
+  firecrawl:
+    monthly_credits: 1000          # free tier limit
+    reserve_for: [unknown_career_page, jd_cleanup]
+  apify:
+    monthly_usd: 5.0               # free tier credit
+
+fallback_triggers:
+  - blocked_403
+  - captcha_on_discovery
+  - parse_failed
+  - zero_results_but_expected

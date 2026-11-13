@@ -1,0 +1,52 @@
+# Application guardrails – edit freely, no restart needed (read on each run).
+
+# ── ATS focus ────────────────────────────────────────────────────────────────
+# Only these ATS types are discovered, tailored, and applied to.
+# Comment out or set to [] to process all supported ATS types.
+# Current focus: Greenhouse only — solid, well-tested, confirmed working.
+active_ats: [greenhouse]
+
+daily_cap: 40
+
+per_channel_caps:
+  greenhouse: 20
+  linkedin_easy_apply: 15     # feature-flagged; set to 0 to disable completely
+  workday: 10
+  generic_agent: 5
+  email_apply: 5
+
+per_company_cooldown_days: 30   # never apply twice to the same company within N days
+
+# Scoring threshold.  With the new rubric (location_visa_fit = 30pts, was 15),
+# a job with visa_sponsorship=unknown (15pts) + strong skills (30pts) +
+# good experience (20pts) + seniority match (10pts) = 75 total.  Borderline
+# jobs scoring 65–74 are still worth applying to since visa confirmation happens
+# during the process, not in the job description.
+min_score: 65
+
+max_job_age_days: 21
+
+# Shadow mode: agent fills forms but does NOT click Submit until this passes.
+shadow_mode: true               # set to false only after shadow_min_runs succeed
+shadow_success_threshold: 0.90  # 90% of forms must fill fully before going live
+shadow_min_runs: 20             # minimum runs per ATS before auto-promotion
+
+auth_assist:
+  enabled: true
+  timeout_minutes: 10           # give up and skip if you don't respond
+
+pacing:
+  min_seconds: 5     # reduced for testing; set back to 45 for production
+  max_seconds: 15    # reduced for testing; set back to 180 for production
+  max_parallel_browsers: 3
+  active_hours:
+    start: 8
+    end: 22                     # local time; no applying overnight
+
+per_application_budget:
+  max_actions: 120              # LLM browser-agent action limit
+  max_minutes: 25
+  max_cost_usd: 1.00            # hard $ cap per application; abort if exceeded
+
+run_mode: manual                # "manual" = one-click; "scheduled" = launchd cron
+# discovery_cron: "0 */4 * * *"  # uncomment when switching to scheduled
