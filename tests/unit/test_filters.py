@@ -189,3 +189,57 @@ class TestIndiaSalaryAnswer:
         answer = get_salary_answer("IN", "year", seed)
         assert answer == "30 LPA INR"
         assert "EUR" not in answer
+
+
+# ---------------------------------------------------------------------------
+# Full country names + Greenhouse location/office precedence
+# ---------------------------------------------------------------------------
+
+class TestCountryNames:
+    @pytest.mark.parametrize(
+        ("location", "expected"),
+        [
+            ("Peru", "PE"),
+            ("Remote - Peru", "PE"),
+            ("Mexico", "MX"),
+            ("Brazil", "BR"),
+            ("Toronto, Canada", "CA"),
+            ("Bengaluru, India", "IN"),
+            ("Berlin, Germany", "DE"),
+        ],
+    )
+    def test_country_names_resolve(self, location: str, expected: str) -> None:
+        assert detect_country(location) == expected
+
+
+class TestGreenhouseCountryPrecedence:
+    def _parse(self, **job):
+        from jobagent.discovery.collectors.greenhouse import _parse_job
+
+        base = {
+            "id": 1,
+            "title": "Senior Data Engineer",
+            "absolute_url": "https://example.test/job/1",
+            "content": "<p>Python dbt Snowflake</p>",
+        }
+        base.update(job)
+        return _parse_job(base, "acme")
+
+    def test_posting_location_beats_offices(self) -> None:
+        raw = self._parse(location={"name": "Peru"}, offices=[{"name": "Belgium"}])
+        assert raw.country == "PE"
+
+    def test_single_office_fallback_for_remote(self) -> None:
+        raw = self._parse(location={"name": "Remote"}, offices=[{"name": "Berlin"}])
+        assert raw.country == "DE"
+
+    def test_ambiguous_offices_are_unknown(self) -> None:
+        raw = self._parse(
+            location={"name": "Remote"},
+            offices=[{"name": "Berlin"}, {"name": "Paris"}],
+        )
+        assert raw.country is None
+
+    def test_us_only_offices_resolve_us(self) -> None:
+        raw = self._parse(location={"name": "Remote"}, offices=[{"name": "New York"}])
+        assert raw.country == "US"

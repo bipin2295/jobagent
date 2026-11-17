@@ -204,6 +204,46 @@ COUNTRY_KEYWORDS: dict[str, list[str]] = {
     ],
 }
 
+# Full country names → ISO, matched on WORD BOUNDARIES as a second pass. This
+# catches non-target countries (e.g. "Peru") that the city/keyword table does
+# not cover, so jobs in them resolve to an ISO code and are rejected by the
+# country allowlist instead of silently becoming "unknown".
+COUNTRY_NAMES: dict[str, str] = {
+    # target countries
+    "india": "IN", "canada": "CA", "australia": "AU", "new zealand": "NZ",
+    "singapore": "SG", "japan": "JP", "hong kong": "HK", "malaysia": "MY",
+    "thailand": "TH", "vietnam": "VN", "viet nam": "VN",
+    "united states": "US", "usa": "US", "united kingdom": "GB",
+    "great britain": "GB", "england": "GB", "scotland": "GB", "wales": "GB",
+    "ireland": "IE", "germany": "DE", "france": "FR", "spain": "ES",
+    "portugal": "PT", "italy": "IT", "netherlands": "NL", "belgium": "BE",
+    "luxembourg": "LU", "switzerland": "CH", "austria": "AT", "sweden": "SE",
+    "norway": "NO", "denmark": "DK", "finland": "FI", "poland": "PL",
+    "czech republic": "CZ", "czechia": "CZ", "slovakia": "SK",
+    "slovenia": "SI", "estonia": "EE", "latvia": "LV", "lithuania": "LT",
+    "croatia": "HR", "bulgaria": "BG", "romania": "RO", "hungary": "HU",
+    "greece": "GR", "cyprus": "CY", "malta": "MT", "iceland": "IS",
+    "united arab emirates": "AE", "uae": "AE", "saudi arabia": "SA",
+    "qatar": "QA", "kuwait": "KW", "bahrain": "BH", "oman": "OM",
+    # non-target countries commonly seen in aggregator feeds
+    "peru": "PE", "mexico": "MX", "brazil": "BR", "argentina": "AR",
+    "colombia": "CO", "chile": "CL", "uruguay": "UY", "paraguay": "PY",
+    "bolivia": "BO", "ecuador": "EC", "venezuela": "VE", "costa rica": "CR",
+    "panama": "PA", "guatemala": "GT", "honduras": "HN", "el salvador": "SV",
+    "nicaragua": "NI", "dominican republic": "DO", "cuba": "CU",
+    "puerto rico": "PR", "jamaica": "JM", "haiti": "HT",
+    "south africa": "ZA", "nigeria": "NG", "kenya": "KE", "ghana": "GH",
+    "egypt": "EG", "morocco": "MA", "tunisia": "TN", "algeria": "DZ",
+    "ethiopia": "ET", "uganda": "UG", "tanzania": "TZ",
+    "israel": "IL", "turkey": "TR", "türkiye": "TR", "pakistan": "PK",
+    "bangladesh": "BD", "sri lanka": "LK", "nepal": "NP", "indonesia": "ID",
+    "philippines": "PH", "china": "CN", "taiwan": "TW", "south korea": "KR",
+    "north korea": "KP", "russia": "RU", "ukraine": "UA", "serbia": "RS",
+    "belarus": "BY", "kazakhstan": "KZ", "uzbekistan": "UZ",
+    "armenia": "AM", "jordan": "JO", "lebanon": "LB",
+}
+
+
 # ---------------------------------------------------------------------------
 # Internal regex helpers
 # ---------------------------------------------------------------------------
@@ -312,6 +352,11 @@ def detect_country(
         for kw in keywords:
             if kw in lower:
                 return iso_code
+    # Second pass: full country names (word-boundary matched so "chad" does not
+    # match "Chadstone" and "niger" does not match "Nigeria").
+    for name, iso_code in COUNTRY_NAMES.items():
+        if re.search(rf"\b{re.escape(name)}\b", lower):
+            return iso_code
     return None
 
 

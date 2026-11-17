@@ -21,6 +21,7 @@ import structlog
 from jobagent.discovery.base import CollectorBase, RawJob
 from jobagent.discovery.boards import BoardOutcome, BoardRef, outcome_from_status
 from jobagent.discovery.company_universe import CompanyUniverse
+from jobagent.pipeline.normalise import detect_country
 
 log = structlog.get_logger(__name__)
 
@@ -160,12 +161,12 @@ def _country_from_offices(office_objects: list[dict]) -> str | None:
     """Derive a country ISO code from the Greenhouse offices array.
 
     Rules:
-    - If ALL non-empty offices are in the same country → return that country.
-    - If offices span multiple countries AND one of them is non-US → return
-      the first non-US country (a multinational company is likely to offer
-      the role in its non-US locations too).
-    - If ALL offices are US → return "US" (will be filtered out).
-    - If no offices (fully remote or unset) → return None.
+    - If ALL offices resolve to a single country → return it.
+    - If offices span multiple countries → return None (ambiguous). The
+      posting's own location decides the role's country; falling back to an
+      arbitrary office is how a Peru role at a multi-office company was tagged
+      "Belgium". Unknown country is then rejected by the allowlist filter.
+    - If no offices → None.
     """
     countries: list[str] = []
     for office in office_objects:
@@ -184,13 +185,11 @@ def _country_from_offices(office_objects: list[dict]) -> str | None:
         return None
 
     unique = list(dict.fromkeys(countries))  # preserve order, dedupe
-    non_us = [c for c in unique if c != "US"]
-
-    if not non_us:
-        return "US"           # all offices US
-    if len(non_us) == 1:
-        return non_us[0]      # single non-US country
-    # Multiple non-US countries → return None (let normaliser decide from location_raw)
+    if not unique:
+        return None
+    if len(unique) == 1:
+        return unique[0]
+    # Multiple countries → ambiguous. Do not guess an office country.
     return None
 
 
@@ -220,7 +219,14 @@ def _parse_job(job: dict[str, Any], slug: str, company_name: str | None = None) 
     # string that is often "Remote" or blank).  Build a set of countries from
     # all offices and use it to tag the job country on the RawJob so the hard
     # filter can reject US-only roles immediately without enrichment.
-    detected_country: str | None = _country_from_offices(office_objects)
+    # The posting's own location is authoritative; offices are only a fallback
+    # for remote/blank locations (and only when they agree on one country).
+    location_name = job.get("location", {}).get("name")
+    detected_country: str | None = (
+        detect_country(location_name) if location_name else None
+    )
+    if detected_country is None:
+        detected_country = _country_from_offices(office_objects)
 
     extra: dict[str, Any] = {
         "slug": slug,

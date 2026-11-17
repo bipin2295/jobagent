@@ -94,6 +94,38 @@ async def _fill_phone(scope, phone: str) -> bool:  # type: ignore[no-untyped-def
         return False
 
 
+async def _form_country_mismatch(scope, job) -> str | None:  # type: ignore[no-untyped-def]
+    """Return an ISO code if the form asks to work in a different country.
+
+    Greenhouse custom questions often read "Are you legally authorized to work
+    in <country>?". If that country is neither the candidate's home country nor
+    the job's country, the posting is for a role we cannot take (e.g. a Peru
+    role tagged as Belgium), so the caller aborts before submitting.
+    """
+    import re as _re  # noqa: PLC0415
+
+    from jobagent.pipeline.normalise import detect_country  # noqa: PLC0415
+
+    try:
+        text = await scope.inner_text()
+    except Exception:
+        return None
+
+    job_country = (job.country or "").upper()
+    for m in _re.finditer(
+        r"(?:authori[sz]ed|eligible|permitted|right)\s+to\s+work\s+in\s+([^\n?.!;]{2,40})",
+        text,
+        _re.IGNORECASE,
+    ):
+        iso = detect_country(m.group(1).strip())
+        if not iso or iso == "IN":
+            continue
+        if job_country and iso == job_country:
+            continue
+        return iso
+    return None
+
+
 async def _validation_errors(scope) -> list[str]:  # type: ignore[no-untyped-def]
     """Collect visible validation messages after a blocked submit."""
     import re as _re  # noqa: PLC0415
@@ -1409,6 +1441,24 @@ class GreenhouseHandler(ApplyHandlerBase):
                             + "; ".join(unresolved[:6])
                         ),
                         screenshot_before=shot_dir / "step_03_unanswerable.png",
+                    )
+
+                # ── Step 8d: country/role guard ──────────────────────────────
+                country_mismatch = await _form_country_mismatch(fill_scope, job)
+                if country_mismatch:
+                    await page.screenshot(
+                        path=str(shot_dir / "step_country_mismatch.png")
+                    )
+                    return ApplyResult(
+                        success=False,
+                        application_id=app.id,
+                        status="failed",
+                        error=(
+                            "Form asks for work authorization in "
+                            f"{country_mismatch}, but the job country is "
+                            f"{job.country!r} — role appears to be elsewhere."
+                        ),
+                        screenshot_before=shot_dir / "step_country_mismatch.png",
                     )
 
                 # ── Step 9: Pre-submit screenshot ────────────────────────────

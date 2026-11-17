@@ -142,6 +142,49 @@ def is_duplicate(raw: RawJob, session: Session) -> bool:
     return session.exec(stmt).first() is not None
 
 
+#: Statuses where it is safe to refresh location/country from the feed. Once a
+#: job has been tailored or applied, its historical location is left intact.
+_REFRESHABLE_STATUSES = frozenset(
+    {"discovered", "enriched", "ready_to_score", "queued", "rejected_low_score", "filtered_out"}
+)
+
+
+def _refresh_existing(existing: Job, raw: RawJob, fresh: Job) -> None:
+    """Refresh mutable posting fields on an existing job.
+
+    Previously only ``last_seen_at`` was updated, so a posting whose location
+    or ATS changed kept its stale country forever (e.g. a role that moved to
+    Peru stayed tagged Belgium).
+    """
+    if raw.url:
+        existing.url = raw.url
+    if raw.apply_url:
+        existing.apply_url = raw.apply_url
+    if fresh.ats_type and fresh.ats_type != "unknown":
+        existing.ats_type = fresh.ats_type
+    if fresh.title:
+        existing.title = fresh.title
+        existing.title_norm = fresh.title_norm
+    if fresh.description_md:
+        existing.description_md = fresh.description_md
+    if fresh.posted_at:
+        existing.posted_at = fresh.posted_at
+    if fresh.salary_min is not None:
+        existing.salary_min = fresh.salary_min
+    if fresh.salary_max is not None:
+        existing.salary_max = fresh.salary_max
+    if fresh.currency:
+        existing.currency = fresh.currency
+    if fresh.employment_type:
+        existing.employment_type = fresh.employment_type
+
+    if (existing.status or "") in _REFRESHABLE_STATUSES:
+        existing.country = fresh.country
+        existing.city = fresh.city
+        existing.remote_type = fresh.remote_type
+        existing.content_hash = fresh.content_hash
+
+
 def upsert_job(raw: RawJob, session: Session) -> tuple[Job, bool]:
     """Insert or update *raw* in the database.
 
@@ -167,6 +210,7 @@ def upsert_job(raw: RawJob, session: Session) -> tuple[Job, bool]:
     existing = session.exec(stmt).first()
     if existing is not None:
         existing.last_seen_at = now
+        _refresh_existing(existing, raw, normalise(raw))
         session.add(existing)
         assert existing.id is not None
         _ensure_job_source(existing.id, raw.source, raw.url, session)
