@@ -46,10 +46,15 @@ Scoring guide:
     30 = visa sponsorship CONFIRMED AND relocation support CONFIRMED
     25 = visa sponsorship confirmed, relocation not mentioned (assume possible)
     20 = visa sponsorship confirmed, relocation explicitly NOT offered
-    15 = visa sponsorship UNKNOWN (not mentioned in JD) — could go either way
+    15 = sponsorship UNKNOWN **but the role is in a country the candidate targets** (UK, EU/EEA, CH, ME, APAC, Canada) — could go either way
     10 = remote role explicitly open to candidates worldwide (no relocation needed)
-     5 = US-based role or no sponsorship indicators (high risk)
+     5 = US-based role, OR the location/country is not stated clearly enough to tell
      0 = sponsorship EXPLICITLY DENIED ("no sponsorship", "must be authorized", etc.)
+
+    IMPORTANT: the candidate cannot work in the United States (no H-1B). A role
+    that is US-based, US-remote, or whose location you cannot establish scores
+    at most 5 here — never 15. Only award 15 when you can name the target
+    country from the JD.
 
     Key signals that CONFIRM sponsorship:
     - "visa sponsorship available", "we sponsor visas", "global talent stream",

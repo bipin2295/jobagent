@@ -64,7 +64,19 @@ def structured_complete(
             last_error = exc
             if attempt < max_repair_attempts:
                 repair_msg = {"role": "user", "content": _REPAIR_PROMPT.format(error=str(exc))}
-                augmented = augmented + [{"role": "assistant", "content": raw}, repair_msg]
+                if raw and raw.strip():
+                    augmented = augmented + [{"role": "assistant", "content": raw}, repair_msg]
+                else:
+                    # Never replay an empty assistant message: some gateways
+                    # reject it with an opaque "every message needs non-empty
+                    # content" 400, hiding the real cause (usually max_tokens
+                    # truncating a reasoning model to no visible output).
+                    augmented = augmented + [
+                        {
+                            "role": "user",
+                            "content": "Your previous response was empty. " + repair_msg["content"],
+                        }
+                    ]
 
     raise ValueError(
         f"structured_complete failed after {max_repair_attempts + 1} attempts "

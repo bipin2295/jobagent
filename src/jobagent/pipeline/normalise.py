@@ -111,7 +111,8 @@ COUNTRY_KEYWORDS: dict[str, list[str]] = {
     "IT": [
         "italy", "italia",
         "rome", "roma", "milan", "milano", "florence", "firenze",
-        "naples", "napoli", "turin", "torino", "bologna", "venice", "venezia",
+        # "napoli" is deliberately omitted: it is a substring of "Indianapolis".
+        "naples", "turin", "torino", "bologna", "venice", "venezia",
     ],
     "CZ": [
         "czech", "czechia", "czech republic",
@@ -156,6 +157,44 @@ COUNTRY_KEYWORDS: dict[str, list[str]] = {
     "MY": ["malaysia", "kuala lumpur", "kl", "penang", "johor"],
     "TH": ["thailand", "bangkok", "chiang mai"],
     "VN": ["vietnam", "ho chi minh", "hanoi", "hà nội"],
+    # North America — listed before IN so "Indiana"/"Indianapolis" resolve to
+    # the US rather than matching the "india" keyword below.
+    "US": [
+        "united states", "united states of america", "u.s.a.", "u.s.", " usa",
+        " - us", ", us", "(us)", "us remote", "remote - us", "remote, us",
+        "remote (us)", "remote us", "anywhere in the us", "us-based", "us based",
+        # metros
+        "new york", "nyc", "brooklyn", "san francisco", "bay area",
+        "silicon valley", "san jose", "santa clara", "sunnyvale", "palo alto",
+        "mountain view", "menlo park", "redwood city", "cupertino", "oakland",
+        "berkeley", "sacramento", "los angeles", "san diego", "irvine",
+        "seattle", "bellevue", "redmond", "tacoma", "portland", "denver",
+        "boulder", "austin", "dallas", "houston", "san antonio", "atlanta",
+        "miami", "orlando", "tampa", "boston", "chicago", "philadelphia",
+        "pittsburgh", "phoenix", "salt lake city", "raleigh", "nashville",
+        "minneapolis", "detroit", "st louis", "kansas city", "charlotte",
+        "columbus", "cleveland", "cincinnati", "indianapolis", "milwaukee",
+        "baltimore", "richmond", "reston", "mclean", "arlington",
+        "washington, dc", "district of columbia",
+        # states (full names only — 2-letter codes are too ambiguous)
+        "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+        "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+        "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
+        "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
+        "missouri", "montana", "nebraska", "nevada", "new hampshire",
+        "new jersey", "new mexico", "new york state", "north carolina",
+        "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
+        "rhode island", "south carolina", "south dakota", "tennessee", "texas",
+        "utah", "vermont", "virginia", "west virginia", "wisconsin", "wyoming",
+    ],
+    "CA": [
+        "canada", "canadian",
+        "ontario", "quebec", "british columbia", "alberta", "manitoba",
+        "saskatchewan", "nova scotia", "newfoundland",
+        "toronto", "vancouver", "montreal", "ottawa", "calgary", "edmonton",
+        "winnipeg", "quebec city", "halifax", "waterloo", "kitchener",
+        "mississauga", "markham", "burnaby", "victoria, bc",
+    ],
     # South Asia
     "IN": [
         "india",

@@ -73,9 +73,15 @@ def get_salary_answer(country: str, period: str, answers_seed: dict) -> str | No
     if not comp_block:
         return None
 
+    # India stores CTC in lakhs-per-annum rather than a plain ``expected``
+    # figure. Handle it here so an IN role does not silently fall through to
+    # the EUR default in build_answer_map.
+    if comp_block.get("expected") is None and comp_block.get("expected_ctc_lpa"):
+        ctc = comp_block["expected_ctc_lpa"]
+        return f"{ctc} LPA {comp_block.get('currency', 'INR')}"
+
     expected = comp_block.get("expected")
     if expected is None:
-        # e.g. IN block uses current_ctc_lpa / expected_ctc_lpa instead
         return None
 
     currency = comp_block.get("currency", "")
@@ -146,6 +152,8 @@ def build_answer_map(job: Job, profile: MasterProfile) -> dict[str, str]:
         "earliest_start":   availability.get("earliest_start", "30 days from offer"),
         "willing_to_relocate": "Yes",
         "phone":            phone,
+        # Residence city — taken from the loaded profile, never hardcoded.
+        "city":             profile.contact.location.city,
     }
 
     # ── Salary ────────────────────────────────────────────────────────────────

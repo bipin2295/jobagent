@@ -419,6 +419,21 @@ async def _run_scoring_async(
                 db_job.status = "rejected_low_score"
                 rejected += 1
             else:
+                # Deterministic safety net: the candidate cannot work in the US,
+                # and an unknown country cannot be assessed for visa fit. Cap
+                # location_visa_fit at 5 regardless of what the LLM returned, so
+                # a US/unknown role can never clear the threshold on skills alone.
+                if (db_job.country or "").upper() in ("", "US"):
+                    if result.location_visa_fit > 5:
+                        result = result.model_copy(
+                            update={
+                                "location_visa_fit": 5,
+                                "score": max(
+                                    0, result.score - (result.location_visa_fit - 5)
+                                ),
+                            }
+                        )
+
                 score_row = Score(
                     job_id=job_id,
                     model=model_name,

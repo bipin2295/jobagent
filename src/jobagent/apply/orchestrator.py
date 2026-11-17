@@ -235,6 +235,15 @@ def _update_app_status(app_id: int, status: str, result: ApplyResult) -> None:
             app.confirmation_path = result.confirmation_url
         session.add(app)
 
+        # Keep the job row in sync with the application (DB golden standard:
+        # a submitted application means its job is 'applied'). Without this the
+        # job stayed 'queued' and could be re-tailored and re-applied to.
+        if status == "submitted" and app.job_id:
+            job = session.get(Job, app.job_id)
+            if job is not None and job.status != "applied":
+                job.status = "applied"
+                session.add(job)
+
         event = AppEvent(
             application_id=app_id,
             ts=datetime.now(timezone.utc),

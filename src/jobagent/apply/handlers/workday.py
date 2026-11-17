@@ -328,14 +328,15 @@ async def _fill_my_information(page: Any, answers: dict) -> None:
     except Exception:
         contact = None  # type: ignore[assignment]
 
-    name_parts = (contact.name if contact else answers.get("full_name", "Bipin Singh")).split()
-    first = name_parts[0] if name_parts else "Bipin"
-    last = " ".join(name_parts[1:]) if len(name_parts) > 1 else "Singh"
-    email = contact.email if contact else answers.get("email", "bipin2295@gmail.com")
-    # No hardcoded fallback: the phone number lives only in the git-ignored profile/seed.
+    # No hardcoded personal fallbacks: real values come from the git-ignored
+    # profile / answer seed. Empty values are skipped by the fill loop below.
+    name_parts = (contact.name if contact else answers.get("full_name", "")).split()
+    first = name_parts[0] if name_parts else ""
+    last = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+    email = contact.email if contact else answers.get("email", "")
     phone = contact.phone if contact else answers.get("phone", "")
-    city = answers.get("city", "Pune")
-    country = answers.get("country", "India")
+    city = answers.get("city", "")
+    country = answers.get("country", "")
 
     _fills: list[tuple[str, str]] = [
         ("[data-automation-id='legalNameSection'] input[data-automation-id*='firstName']", first),
@@ -348,6 +349,8 @@ async def _fill_my_information(page: Any, answers: dict) -> None:
     ]
 
     for sel, val in _fills:
+        if not val:
+            continue
         try:
             el = page.locator(sel).first
             if await el.count() > 0 and await el.is_visible():

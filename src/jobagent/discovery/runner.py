@@ -42,9 +42,9 @@ _COLLECTOR_REGISTRY: list[tuple[str, str]] = [
     ("jobagent.discovery.collectors.adzuna", "AdzunaCollector"),
     ("jobagent.discovery.collectors.jooble", "JoobleCollector"),
     ("jobagent.discovery.collectors.reed", "ReedCollector"),
-    ("jobagent.discovery.collectors.jobspy", "JobSpyCollector"),
+    ("jobagent.discovery.collectors.jobspy_collector", "JobSpyCollector"),
     ("jobagent.discovery.collectors.mycareersfuture", "MyCareersFutureCollector"),
-    ("jobagent.discovery.collectors.hnhiring", "HNHiringCollector"),
+    ("jobagent.discovery.collectors.hn_hiring", "HNHiringCollector"),
 ]
 
 # ---------------------------------------------------------------------------

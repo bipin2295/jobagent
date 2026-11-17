@@ -236,9 +236,9 @@ def _build_query(
     if sender_domain:
         parts.append(f"from:{sender_domain}")
     if since:
-        # Gmail's after: filter uses Unix epoch seconds
-        epoch = int(since.timestamp())
-        parts.append(f"after:{epoch}")
+        # Gmail's after: filter takes a date (YYYY/MM/DD), not an epoch. The
+        # exact timestamp is enforced later in _fetch_message.
+        parts.append(f"after:{since.strftime('%Y/%m/%d')}")
     if subject_hint:
         parts.append(f"subject:{subject_hint}")
     return " ".join(parts) if parts else "in:inbox"

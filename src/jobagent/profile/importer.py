@@ -208,9 +208,9 @@ def _parse_contact(lines: list[str]) -> ContactInfo:
     kv = _parse_kv(lines)
 
     # Parse location into struct
-    loc_raw = kv.get("LOCATION", "Pune, India")
-    loc_parts = [p.strip() for p in loc_raw.split(",")]
-    city = loc_parts[0] if loc_parts else "Pune"
+    loc_raw = kv.get("LOCATION", "")
+    loc_parts = [p.strip() for p in loc_raw.split(",")] if loc_raw else []
+    city = loc_parts[0] if loc_parts else ""
     country = "IN"
 
     loc = LocationInfo(

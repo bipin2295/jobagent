@@ -78,6 +78,27 @@ _US_ONLY_PHRASES: list[str] = [
     # intentionally not added — many USD-salary jobs are remote-global
 ]
 
+# Sources that never carry a structured country/office field. When such a job's
+# location text cannot be resolved to a country, we have no way to tell whether
+# it is somewhere we can work — so it is rejected rather than guessed at.
+_UNVERIFIABLE_SOURCES: frozenset[str] = frozenset({
+    "jooble", "adzuna", "reed", "jobspy", "linkedin", "indeed", "bayt",
+})
+
+# Phrases that positively establish a role as remote-worldwide, which is the
+# only case where an unknown country is acceptable (the plan allows
+# "Remote (global)" but every other role must resolve to an allowlisted country).
+_GLOBAL_REMOTE_PHRASES: tuple[str, ...] = (
+    "anywhere in the world",
+    "work from anywhere",
+    "worldwide",
+    "globally remote",
+    "remote worldwide",
+    "remote (global)",
+    "global remote",
+    "fully distributed worldwide",
+)
+
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -133,6 +154,30 @@ def _get_region_for_country(country: str, regions: dict) -> dict | None:  # type
     return None
 
 
+def _salary_floor(country: str, answers: dict) -> tuple[float | None, str | None]:  # type: ignore[type-arg]
+    """Return ``(floor, currency)`` for *country* from the answers seed.
+
+    The seed stores floors in the country's own currency: an ``IN`` block uses
+    ``filter_floor_lpa`` (lakhs per annum), every other country uses ``floor``.
+    Returns ``(None, None)`` when the country has no configured floor.
+    """
+    comp = (answers.get("compensation") or {}).get(country)
+    if not isinstance(comp, dict):
+        return None, None
+
+    currency = comp.get("currency")
+    if country == "IN":
+        floor_lpa = comp.get("filter_floor_lpa")
+        if floor_lpa is None:
+            return None, currency
+        return float(floor_lpa) * 100_000, currency
+
+    floor = comp.get("floor")
+    if floor is None:
+        return None, currency
+    return float(floor), currency
+
+
 # ---------------------------------------------------------------------------
 # Core filter function
 # ---------------------------------------------------------------------------
@@ -142,9 +187,12 @@ def apply_filters(job: Job, search_cfg: dict, answers: dict) -> FilterResult:  #
     """Apply all hard rules in order and return on first failure.
 
     Rules (a–h):
+        a0) Country must be allowlisted (or demonstrably global-remote when
+            unknown); US-company / US-only signals are rejected.
         a) Title must match at least one phrase from search_cfg["titles"].
         b) Title must not contain any excluded keyword.
         c) Posting must not be older than max_age_days.
+        c2) Posted salary maximum must not be below the regional floor.
         d) Company must not be on the blacklist.
         e) Seniority (when known) must be in the allowed set.
         f) Language requirements — deferred to LLM scorer (not stored on Job).
@@ -207,6 +255,24 @@ def apply_filters(job: Job, search_cfg: dict, answers: dict) -> FilterResult:  #
                         reason=f"description signals US-only: '{phrase[:60]}'",
                     )
 
+            # 4. Unknown country: only acceptable for demonstrably global-remote
+            # roles. There is no truthful way to claim visa eligibility for a
+            # posting whose location could not be resolved, and aggregator feeds
+            # routinely return US roles with a blank location (e.g. Jooble
+            # "Remote"). Everything else must resolve to an allowlisted country.
+            is_global_remote = job.remote_type == "remote" and any(
+                p in _desc for p in _GLOBAL_REMOTE_PHRASES
+            )
+            if not is_global_remote:
+                source = (job.source or "").lower()
+                if source in _UNVERIFIABLE_SOURCES:
+                    reason = (
+                        f"aggregator job with unverifiable country (source={source!r})"
+                    )
+                else:
+                    reason = "country could not be determined and role is not global-remote"
+                return FilterResult(passed=False, reason=reason)
+
     # ── a. Title allowlist ───────────────────────────────────────────────────
     titles: list[str] = search_cfg.get("titles", [])
     if titles:
@@ -233,6 +299,33 @@ def apply_filters(job: Job, search_cfg: dict, answers: dict) -> FilterResult:  #
             return FilterResult(
                 passed=False,
                 reason=f"posting too old ({age.days} days > {max_age_days})",
+            )
+
+    # ── c2. Salary floor ─────────────────────────────────────────────────────
+    # Reject when the posting's maximum is below the regional floor (PLAN §4.3).
+    # Only enforced when the posting currency matches the seed's currency for
+    # that country, so we never compare USD figures against a EUR floor.
+    if job.salary_max is not None and job.country:
+        floor, floor_currency = _salary_floor(job.country, answers)
+        # Aggregators quote monthly or daily rates for some markets (e.g.
+        # Singapore SGD 1,440/month, Australia AUD 421/day). Comparing those to
+        # an annual floor would reject good roles, so only enforce the floor
+        # when the figure is at least two months' worth of it — i.e. plausibly
+        # an annual salary.
+        plausibly_annual = floor is not None and job.salary_max >= (floor / 6)
+        if (
+            floor is not None
+            and floor_currency
+            and plausibly_annual
+            and (job.currency or "").upper() == floor_currency.upper()
+            and job.salary_max < floor
+        ):
+            return FilterResult(
+                passed=False,
+                reason=(
+                    f"salary below floor: max {job.salary_max:,.0f} "
+                    f"{job.currency} < {floor:,.0f} {floor_currency}"
+                ),
             )
 
     # ── d. Blacklist ─────────────────────────────────────────────────────────

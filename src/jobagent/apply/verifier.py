@@ -7,6 +7,7 @@ Phase 5c+ will add an LLM vision pass on top of this.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import structlog
 from playwright.async_api import Page
@@ -48,6 +49,7 @@ async def verify_form(
     app: Application,
     profile: MasterProfile,
     screenshot_path: Path,
+    scope: Any | None = None,
 ) -> VerifierResult:
     """DOM-based verification of the filled ATS form.
 
@@ -58,26 +60,31 @@ async def verify_form(
     Parameters
     ----------
     page:
-        Active Playwright page on the final-review / confirm step.
+        Active Playwright page (used for the screenshot).
     app:
         The Application ORM row (used for context in log messages).
     profile:
         The loaded MasterProfile (contact details are verified against page).
     screenshot_path:
         Where to save the verification screenshot.
+    scope:
+        Optional Locator for the application *form* itself.  Greenhouse forms
+        are frequently hosted in an iframe, where ``page.inner_text``/``page
+        .evaluate`` cannot see the inputs at all.  Passing the scoped form
+        locator makes every check read the real fields.  Defaults to ``page``.
 
     Notes
     -----
-    This is a Phase 5b implementation.  Checks are purely DOM-based:
+    Checks are purely DOM-based, per PLAN §10A.6 step 1 ("read every field's
+    value back from the DOM and diff it against the intended values"):
 
-    * First name present in page body text.
-    * Email present in page body text.
-    * At least one ``<input type="file">`` has been populated (via
-      ``HTMLInputElement.files.length > 0``).
-
-    The LLM vision pass (Phase 5c+) will be layered on top once the
-    basic DOM checks pass.
+    * First name and email appear in the form text or in an input value.
+    * Every visible required field has a value.
+    * At least one ``<input type="file">`` has been populated (non-fatal —
+      some ATS platforms hide the input after upload).
     """
+    target: Any = scope if scope is not None else page
+
     issues: list[str] = []
     name_correct = True
     email_correct = True
@@ -101,8 +108,25 @@ async def verify_form(
 
     # ── Text content checks ───────────────────────────────────────────────
     try:
-        body_text: str = await page.inner_text("body")
-        body_lower = body_text.lower()
+        body_text: str = (
+            await target.inner_text() if scope is not None else await page.inner_text("body")
+        )
+
+        # Read every field value back from the DOM — the form text alone does
+        # not include what was typed, and an iframe hides it from the page.
+        value_parts: list[str] = []
+        try:
+            inputs = target.locator("input:not([type=hidden]), textarea")
+            for i in range(min(await inputs.count(), 80)):
+                try:
+                    v = await inputs.nth(i).input_value()
+                    if v:
+                        value_parts.append(v)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        body_lower = (body_text + " " + " ".join(value_parts)).lower()
 
         # Name check — look for first name (robust against full-name
         # concatenation or truncation by ATS)
@@ -134,18 +158,61 @@ async def verify_form(
         issues.append(f"Could not verify form text: {exc}")
         log.warning("verifier.body_text_failed", app_id=app.id, error=str(exc))
 
+    # ── Required-field read-back ──────────────────────────────────────────
+    # Every visible required text/select/textarea must hold a value. React-select
+    # comboboxes are skipped: their visible input stays empty even after a value
+    # is committed, so checking it would produce false failures.
+    try:
+        required = target.locator(
+            "input[required], select[required], textarea[required], "
+            "input[aria-required='true'], select[aria-required='true'], "
+            "textarea[aria-required='true']"
+        )
+        for i in range(await required.count()):
+            el = required.nth(i)
+            try:
+                if not await el.is_visible():
+                    continue
+                # Skip id-less mirror inputs (React-select / native-select
+                # shadow inputs carry a `required` attribute but are not
+                # user-facing fields; flagging them creates false failures).
+                el_id = await el.get_attribute("id") or ""
+                aria_req = (await el.get_attribute("aria-required") or "").lower()
+                if not el_id and aria_req != "true":
+                    continue
+                if (await el.get_attribute("role") or "").lower() == "combobox":
+                    continue
+                field_type = (await el.get_attribute("type") or "").lower()
+                if field_type in ("checkbox", "radio", "file", "hidden", "submit", "button"):
+                    continue
+                if (await el.input_value() or "").strip():
+                    continue
+                ident = (
+                    await el.get_attribute("id")
+                    or await el.get_attribute("name")
+                    or field_type
+                    or "field"
+                )
+                issues.append(f"Required field left empty: {ident}")
+                log.debug("verifier.required_empty", app_id=app.id, field=ident)
+            except Exception:
+                continue
+    except Exception as exc:
+        log.warning("verifier.required_check_failed", app_id=app.id, error=str(exc))
+
     # ── Resume attachment check ───────────────────────────────────────────
     try:
-        file_input_count: int = await page.evaluate(
-            """() => {
-                const inputs = document.querySelectorAll('input[type="file"]');
-                let filled = 0;
-                for (const inp of inputs) {
-                    if (inp.files && inp.files.length > 0) filled++;
-                }
-                return filled;
-            }"""
-        )
+        file_inputs = target.locator('input[type="file"]')
+        file_input_count = 0
+        for i in range(await file_inputs.count()):
+            try:
+                filled = await file_inputs.nth(i).evaluate(
+                    "el => (el.files ? el.files.length : 0)"
+                )
+                if filled:
+                    file_input_count += int(filled)
+            except Exception:
+                continue
         if file_input_count == 0:
             # Non-fatal: some ATS platforms hide the file input after upload
             # or use a custom widget.  Downgrade to a warning, not an issue.

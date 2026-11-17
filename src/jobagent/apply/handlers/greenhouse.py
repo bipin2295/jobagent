@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import traceback
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import structlog
@@ -28,6 +29,8 @@ from jobagent.apply.browser import new_page
 from jobagent.apply.field_mapper import build_field_values, fill_all_common_fields
 from jobagent.apply.guardrails import human_like_pause, shadow_mode_gate
 from jobagent.apply.manual import await_manual_submit, focus_form
+from jobagent.apply.question_engine import answer_custom_questions
+from jobagent.apply.verifier import verify_form
 from jobagent.db.engine import get_session
 from jobagent.db.models import Application, Company, Job
 from jobagent.profile.loader import load_profile
@@ -45,6 +48,127 @@ async def _click_robust(loc, timeout: int = 8000) -> None:  # type: ignore[no-un
         await loc.click(timeout=timeout)
     except Exception:
         await loc.click(timeout=timeout, force=True)
+
+
+async def _fill_phone(scope, phone: str) -> bool:  # type: ignore[no-untyped-def]
+    """Fill the phone field and make the intl-tel-input dial code match.
+
+    Greenhouse's phone widget (intl-tel-input) keeps a country dial-code
+    selector beside the input. Left on its default (often US), a ``+91`` number
+    can be reformatted or rejected. Set the flag to +91 first, then type the
+    digits so the widget's own handlers run and commit the value.
+    """
+    import re as _re  # noqa: PLC0415
+
+    digits = _re.sub(r"[^\d+]", "", phone or "")
+    if not digits:
+        return False
+    try:
+        tel = scope.locator("input[type='tel'], input#phone")
+        if await tel.count() == 0:
+            by_label = scope.get_by_label("Phone", exact=False)
+            if await by_label.count() > 0:
+                tel = by_label
+        if await tel.count() == 0:
+            return False
+        target = tel.first
+
+        flag = scope.locator(".iti__selected-flag, .iti__flag-container").first
+        if await flag.count() > 0:
+            try:
+                await _click_robust(flag)
+                await asyncio.sleep(0.3)
+                india = scope.locator(
+                    ".iti__country[data-dial-code='91'], li[data-dial-code='91']"
+                )
+                if await india.count() > 0:
+                    await _click_robust(india.first)
+            except Exception:
+                pass
+
+        await target.scroll_into_view_if_needed(timeout=2000)
+        await target.fill("")
+        await target.type(digits, delay=40)
+        return bool((await target.input_value() or "").strip())
+    except Exception:
+        return False
+
+
+async def _handle_security_code(page, scope, since, ) -> bool:  # type: ignore[no-untyped-def]
+    """Complete Greenhouse's post-submit email security-code step.
+
+    Some tenants ask for an 8-character code emailed to the applicant before
+    the application is finalised. Read the code from Gmail and enter it into
+    either the 8 single-character boxes or a single code field, then submit.
+    """
+    inputs = scope.locator("input[maxlength='1']")
+    single_boxes = await inputs.count()
+    field = scope.locator(
+        "input[name*='code' i], input[id*='code' i], "
+        "input[placeholder*='code' i], input[autocomplete='one-time-code']"
+    )
+    has_field = await field.count() > 0
+    if single_boxes < 4 and not has_field:
+        return False
+
+    log.info(
+        "greenhouse.security_code_prompt",
+        single_boxes=single_boxes,
+        single_field=has_field,
+    )
+    try:
+        from jobagent.email_provider import EmailProvider  # noqa: PLC0415
+
+        provider = EmailProvider()
+        if not provider.connected:
+            log.warning("greenhouse.security_code_no_gmail")
+            return False
+        res = await provider.wait_for_verification_email(
+            sender_domain="greenhouse",
+            since=since,
+            timeout_seconds=180,
+            subject_hint="Security",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("greenhouse.security_code_email_error", error=str(exc)[:120])
+        return False
+
+    otp = (res.otp or "").strip()
+    if not otp:
+        log.warning("greenhouse.security_code_missing")
+        return False
+
+    try:
+        if single_boxes >= len(otp):
+            for i, ch in enumerate(otp):
+                box = inputs.nth(i)
+                try:
+                    await box.fill(ch, timeout=3000)
+                except Exception:
+                    await box.click()
+                    await page.keyboard.type(ch)
+            log.info("greenhouse.security_code_entered_boxes", boxes=len(otp))
+        else:
+            target = field.first
+            await _click_robust(target)
+            await target.fill(otp)
+            log.info("greenhouse.security_code_entered_field")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("greenhouse.security_code_fill_error", error=str(exc)[:120])
+        return False
+
+    await asyncio.sleep(1)
+    for name in ("Submit application", "Submit", "Verify", "Confirm", "Continue"):
+        btn = page.get_by_role("button", name=name)
+        if await btn.count() > 0:
+            try:
+                await _click_robust(btn.first)
+                log.info("greenhouse.security_code_submitted", button=name)
+            except Exception:
+                pass
+            break
+    await asyncio.sleep(6)
+    return True
 
 
 async def _looks_like_application_form(frame) -> bool:  # type: ignore[no-untyped-def]
@@ -216,8 +340,14 @@ async def _is_confirmation_page(page) -> bool:  # type: ignore[type-arg]
         return False
 
 
-async def _handle_custom_questions(page, answers: dict) -> None:  # type: ignore[type-arg]
+async def _handle_custom_questions(page, answers: dict, frame=None) -> None:  # type: ignore[no-untyped-def, type-arg]
     """Answer Greenhouse custom questions (radio + text) based on keyword matching.
+
+    *page* is the scoped form.  *frame* (the full page/frame) is used for
+    ``[role=option]`` lookups, because React-select menus are portalled to
+    ``document.body`` — outside the form — and are invisible to a form-scoped
+    locator.  Without it, combobox answers silently fail (type + Enter does not
+    commit a React-select).
 
     Handles patterns like:
     - "Will you require sponsorship?" → Yes / No based on answers["require_sponsorship"]
@@ -227,10 +357,16 @@ async def _handle_custom_questions(page, answers: dict) -> None:  # type: ignore
     - Privacy / consent acknowledgment → accept
     """
     # Keyword patterns → answer value
+    # Order matters: "which countries do you have the right to work in?" is a
+    # different question from "do you have the right to work without
+    # sponsorship?", and the latter must not be answered with "Yes" by a
+    # candidate who needs sponsorship.
     _PATTERNS: list[tuple[list[str], str]] = [
-        (["sponsorship", "sponsor", "work authorization"], answers.get("require_sponsorship", "Yes")),
-        (["right to work", "unrestricted right", "work without"], answers.get("right_to_work", "No")),
-        (["countries", "right to work", "unrestricted"], "India"),
+        (["countries"], "India"),
+        (["right to work", "unrestricted right", "work without sponsorship", "legally authori"],
+         answers.get("right_to_work", "No")),
+        (["sponsorship", "sponsor", "work authorization", "work authorisation"],
+         answers.get("require_sponsorship", "Yes")),
         (["belarus", "cuba", "iran", "north korea", "dprk", "syria", "russia"], "No"),
         (["acknowledge", "privacy", "consent", "agreement", "i agree"], "I acknowledge"),
     ]
@@ -332,14 +468,16 @@ async def _handle_custom_questions(page, answers: dict) -> None:  # type: ignore
         # Clear any residual search text from the .fill() pass, then type
         # slowly so the Google Places input handler fires properly.
         await loc_field.first.select_text()
-        city_text = answers.get("city", "Pune")
+        city_text = answers.get("city") or ""
+        if not city_text:
+            raise StopIteration  # no city known — leave the field alone
         await loc_field.first.type(city_text, delay=90)
         await asyncio.sleep(2.5)  # wait for Google Places API response
 
         # Find the Places suggestion list. It may be portalled outside the
         # form; search the full frame to be safe.
         # Exclude intl-tel-input options (they have data-dial-code attribute).
-        opts = page.locator("[role=option]")
+        opts = (frame or page).locator("[role=option]")
         chosen = False
         for _oi in range(await opts.count()):
             _o = opts.nth(_oi)
@@ -396,11 +534,13 @@ async def _handle_custom_questions(page, answers: dict) -> None:  # type: ignore
             pass
 
     _COMBOBOX_ANSWERS: list[tuple[str, str]] = [
-        ("sponsorship",          "Yes"),   # requires sponsorship → Yes
-        ("require.*sponsor",     "Yes"),
+        # Country-specific question first, then the two sponsorship phrasings in
+        # the correct precedence order.
+        ("which countries|countries where|countries do you|countries in which", "India"),
+        ("right to work|work without sponsorship|legally authori",
+         answers.get("right_to_work", "No")),
+        ("require.*sponsor|sponsorship", answers.get("require_sponsorship", "Yes")),
         ("relocat",              "Yes"),   # willing to relocate / live in location
-        ("unrestricted right",   "India"), # text field
-        ("countries.*right",     "India"),
         ("belarus.*cuba.*iran",  "No"),    # sanctions question
         ("citizenship.*cuba.*iran", "No"), # citizenship sanctions
         ("permanent residency.*cuba", "No"),
@@ -461,7 +601,8 @@ async def _handle_custom_questions(page, answers: dict) -> None:  # type: ignore
             await asyncio.sleep(0.8)
 
             # Find the option that matches desired value
-            opt = page.locator(f"[role=option]:text-matches('{desired}', 'i')")
+            opt_root = frame or page
+            opt = opt_root.locator(f"[role=option]:text-matches('{desired}', 'i')")
             if await opt.count() > 0:
                 await _click_robust(opt.first)
                 await asyncio.sleep(0.3)
@@ -470,7 +611,7 @@ async def _handle_custom_questions(page, answers: dict) -> None:  # type: ignore
                 # Type the value and accept
                 await cb.fill(desired)
                 await asyncio.sleep(0.5)
-                opts_after = page.locator("[role=option]")
+                opts_after = (frame or page).locator("[role=option]")
                 if await opts_after.count() > 0:
                     await _click_robust(opts_after.first)
                 else:
@@ -487,7 +628,7 @@ async def _handle_custom_questions(page, answers: dict) -> None:  # type: ignore
                 pass
 
 
-async def _handle_eeo_dropdowns(page, answers: dict) -> None:  # type: ignore[type-arg]
+async def _handle_eeo_dropdowns(page, answers: dict, frame=None) -> None:  # type: ignore[no-untyped-def, type-arg]
     """Select the best EEO option for each demographic field.
 
     Covers both native ``<select>`` elements and React-select comboboxes
@@ -599,7 +740,7 @@ async def _handle_eeo_dropdowns(page, answers: dict) -> None:  # type: ignore[ty
             await _click_robust(click_target)
             await asyncio.sleep(0.5)
 
-            opts = page.locator("[role=option]")
+            opts = (frame or page).locator("[role=option]")
             opt_texts = []
             for k in range(await opts.count()):
                 opt_texts.append((k, (await opts.nth(k).inner_text()).strip()))
@@ -648,12 +789,9 @@ async def _handle_eeo_dropdowns(page, answers: dict) -> None:  # type: ignore[ty
 #: Question-label pattern → answer, for questions rendered as native <select>.
 #: Ordered: the first match wins, so put the more specific patterns first.
 _SELECT_ANSWERS: list[tuple[str, str]] = [
-    ("relocat",                                        "Yes"),
-    ("require.*sponsorship|immigration sponsorship",   "Yes"),
-    ("sponsorship to work",                            "Yes"),
-    ("legally authori[sz]ed|right to work",            "Yes"),
-    ("how did you hear",                               "Job board"),
-    ("acknowledge|privacy policy|consent",             "Yes"),
+    ("relocat",                            "Yes"),
+    ("how did you hear",                   "Job board"),
+    ("acknowledge|privacy policy|consent", "Yes"),
 ]
 
 
@@ -675,7 +813,7 @@ async def _label_for(scope, el) -> str:  # type: ignore[no-untyped-def]
     return ""
 
 
-async def _handle_native_selects(scope) -> None:  # type: ignore[no-untyped-def]
+async def _handle_native_selects(scope, answers: dict | None = None) -> None:  # type: ignore[no-untyped-def]
     """Answer questions rendered as a plain ``<select>``.
 
     Greenhouse tenants render custom questions either as React comboboxes
@@ -696,11 +834,24 @@ async def _handle_native_selects(scope) -> None:  # type: ignore[no-untyped-def]
             if not label:
                 continue
 
+            answers = answers or {}
             desired: str | None = None
-            for pattern, answer in _SELECT_ANSWERS:
-                if _re.search(pattern, label):
-                    desired = answer
-                    break
+            # Work authorisation is country-aware, so take it from the answers
+            # map (built per job) rather than a fixed default. Check the
+            # "without sponsorship" phrasing FIRST: "right to work without
+            # sponsorship?" must not be answered as if it were "require
+            # sponsorship?".
+            if _re.search(r"right to work|work without sponsorship|legally authori", label):
+                desired = answers.get("right_to_work", "No")
+            elif _re.search(
+                r"require.*sponsorship|immigration sponsorship|sponsorship", label
+            ):
+                desired = answers.get("require_sponsorship", "Yes")
+            else:
+                for pattern, answer in _SELECT_ANSWERS:
+                    if _re.search(pattern, label):
+                        desired = answer
+                        break
             if desired is None:
                 continue
 
@@ -854,6 +1005,7 @@ class GreenhouseHandler(ApplyHandlerBase):
                             href = await apply_links.nth(i).get_attribute("href") or ""
                             if "form" in href or "gh_jid" in href or "apply" in href.lower():
                                 log.debug("greenhouse.clicking_apply_link", href=href[:60])
+                                pages_before = len(page.context.pages)
                                 try:
                                     await apply_links.nth(i).click(timeout=10_000)
                                 except Exception:
@@ -864,6 +1016,21 @@ class GreenhouseHandler(ApplyHandlerBase):
                                         timeout=10_000, force=True
                                     )
                                 await asyncio.sleep(4)
+                                # Some career sites open the ATS form in a new
+                                # tab (target=_blank). Follow it, otherwise we
+                                # keep inspecting the original page and never
+                                # find the form.
+                                if len(page.context.pages) > pages_before:
+                                    page = page.context.pages[-1]
+                                    form_frame = page
+                                    try:
+                                        await page.wait_for_load_state(
+                                            "domcontentloaded", timeout=15_000
+                                        )
+                                    except Exception:
+                                        pass
+                                    await _dismiss_consent(page)
+                                    log.debug("greenhouse.followed_new_tab", url=page.url[:80])
                                 break
 
                 # Now check if the Greenhouse iframe appeared
@@ -1033,8 +1200,26 @@ class GreenhouseHandler(ApplyHandlerBase):
                 # scope narrows further to the real application form so we
                 # never fill a job-alert signup widget on the same page.
                 fill_scope = await _form_scope(form_frame)
-                await fill_all_common_fields(fill_scope, field_values, resume_path)
+                fill_results = await fill_all_common_fields(
+                    fill_scope, field_values, resume_path
+                )
                 await human_like_pause()
+
+                # Phone needs its own pass: the intl-tel-input widget must have
+                # its dial code set before the digits are typed, otherwise the
+                # number can be reformatted or rejected.
+                phone_value = field_values.get("phone", "")
+                if phone_value:
+                    phone_ok = await _fill_phone(fill_scope, phone_value)
+                    fill_results["phone"] = fill_results.get("phone", False) or phone_ok
+
+                for _key in ("first_name", "last_name", "email"):
+                    if not fill_results.get(_key):
+                        log.warning(
+                            "greenhouse.critical_field_unfilled",
+                            job_id=job.id,
+                            field=_key,
+                        )
 
                 # ── Step 6: Upload cover letter ──────────────────────────────
                 cl_path = package_dir / "cover_letter.txt"
@@ -1058,10 +1243,12 @@ class GreenhouseHandler(ApplyHandlerBase):
                             log.debug("greenhouse.cover_letter_uploaded_file")
 
                 # ── Step 7: EEO dropdowns ────────────────────────────────────
-                await _handle_eeo_dropdowns(fill_scope, answers)
+                # Pass form_frame so portalled (document.body) React-select
+                # menus are still reachable.
+                await _handle_eeo_dropdowns(fill_scope, answers, frame=form_frame)
 
                 # ── Step 7b: Custom yes/no questions (sponsorship, compliance)
-                await _handle_custom_questions(fill_scope, answers)
+                await _handle_custom_questions(fill_scope, answers, frame=form_frame)
                 await human_like_pause()
 
                 # ── Step 8: Dismiss cookie/consent modal (main page) ─────────
@@ -1070,12 +1257,84 @@ class GreenhouseHandler(ApplyHandlerBase):
                 # ── Step 8b: Required checkboxes ─────────────────────────────
                 # Native <select> questions (relocation, sponsorship, …) —
                 # after the EEO pass so demographic answers are preserved.
-                await _handle_native_selects(fill_scope)
+                await _handle_native_selects(fill_scope, answers)
 
                 await _handle_checkboxes(fill_scope)
 
+                # ── Step 8c: LLM answer engine for remaining custom questions ─
+                # Greenhouse tenants attach arbitrary required questions that a
+                # keyword table cannot cover. Answer them from the answer bank;
+                # if any cannot be answered truthfully, abort BEFORE submit.
+                unresolved = await answer_custom_questions(
+                    fill_scope, form_frame, job, profile
+                )
+                if unresolved:
+                    await page.screenshot(
+                        path=str(shot_dir / "step_03_unanswerable.png")
+                    )
+                    return ApplyResult(
+                        success=False,
+                        application_id=app.id,
+                        status="failed",
+                        error=(
+                            "Unanswerable required question(s): "
+                            + "; ".join(unresolved[:6])
+                        ),
+                        screenshot_before=shot_dir / "step_03_unanswerable.png",
+                    )
+
                 # ── Step 9: Pre-submit screenshot ────────────────────────────
                 await page.screenshot(path=str(shot_dir / "step_03_filled.png"))
+
+                # ── Step 9b: Read-back verification (PLAN §10A.6) ────────────
+                # Check the DOM before any submit: name/email present and every
+                # visible required field non-empty. On failure, repair once,
+                # then abort rather than submitting a half-filled form.
+                verification = await verify_form(
+                    page,
+                    app,
+                    profile,
+                    shot_dir / "step_03_verify.png",
+                    scope=fill_scope,
+                )
+                if not verification.passed:
+                    log.warning(
+                        "greenhouse.verify_failed",
+                        job_id=job.id,
+                        issues=verification.issues[:6],
+                    )
+                    try:
+                        await fill_all_common_fields(fill_scope, field_values, resume_path)
+                        if phone_value:
+                            await _fill_phone(fill_scope, phone_value)
+                        await _handle_custom_questions(fill_scope, answers, frame=form_frame)
+                        await _handle_native_selects(fill_scope, answers)
+                        await _handle_checkboxes(fill_scope)
+                    except Exception:
+                        log.debug("greenhouse.verify_repair_error", job_id=job.id)
+
+                    verification = await verify_form(
+                        page,
+                        app,
+                        profile,
+                        shot_dir / "step_03_verify_retry.png",
+                        scope=fill_scope,
+                    )
+                    if not verification.passed:
+                        await page.screenshot(
+                            path=str(shot_dir / "step_03_verify_failed.png")
+                        )
+                        return ApplyResult(
+                            success=False,
+                            application_id=app.id,
+                            status="failed",
+                            error=(
+                                "Pre-submit verifier failed: "
+                                + "; ".join(verification.issues[:6])
+                            ),
+                            screenshot_before=shot_dir / "step_03_verify_failed.png",
+                        )
+                    log.info("greenhouse.verify_recovered", job_id=job.id)
 
                 # ── Step 10: Shadow mode gate ────────────────────────────────
                 if shadow_mode:
@@ -1143,6 +1402,9 @@ class GreenhouseHandler(ApplyHandlerBase):
                 await _dismiss_consent(page)
 
                 log.info("greenhouse.submit_clicked", job_id=job.id)
+                # Capture a lower bound for the security-code email so we only
+                # read the code generated by THIS submission.
+                submitted_at = datetime.now(UTC) - timedelta(seconds=30)
                 await submit_btn.first.click(force=True)  # force=True bypasses intercepting overlays
                 # Wait for the page to settle after submit (some Greenhouse tenants
                 # stay at the same URL but remove the form; allow extra time)
@@ -1155,6 +1417,21 @@ class GreenhouseHandler(ApplyHandlerBase):
 
                 # ── Step 12: Post-submit screenshot ─────────────────────────
                 await page.screenshot(path=str(shot_dir / "step_04_after_submit.png"))
+
+                # ── Step 12b: Email security-code step ──────────────────────
+                # Some tenants finalise only after an 8-character code emailed
+                # to the applicant. Read it from Gmail and enter it.
+                if await _handle_security_code(page, fill_scope, submitted_at):
+                    try:
+                        await page.wait_for_load_state(
+                            "domcontentloaded", timeout=20_000
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(4)
+                    await page.screenshot(
+                        path=str(shot_dir / "step_04b_after_otp.png")
+                    )
 
                 # ── Step 13: CAPTCHA check (post-submit) ─────────────────────
                 # Only block on visible CAPTCHAs after submit

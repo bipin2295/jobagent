@@ -24,7 +24,10 @@ tasks:
 
   scoring:
     model: "@recommended/deepseek-ai/DeepSeek-V4.1-Flash-1017"
-    max_tokens: 1000
+    # DeepSeek V4.1 Flash spends output tokens on internal reasoning; at 1000
+    # the visible content is truncated to an empty string. 3000 leaves room for
+    # reasoning plus the JSON answer.
+    max_tokens: 3000
     temperature: 0.1
 
   email_classification:
@@ -34,7 +37,8 @@ tasks:
 
   form_field_mapping:
     model: "@recommended/deepseek-ai/DeepSeek-V4.1-Flash-1017"
-    max_tokens: 1000
+    # Reasoning model: needs headroom or the visible JSON is truncated to "".
+    max_tokens: 3000
     temperature: 0.0
 
   page_classify:

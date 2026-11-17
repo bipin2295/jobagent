@@ -31,6 +31,7 @@ _LIMIT = 100  # Maximum results per request the API supports
 
 
 class MyCareersFutureCollector(CollectorBase):
+    name = "mycareersfuture"
     source = "mycareersfuture"
 
     async def fetch(self, search_cfg: dict[str, Any]) -> list[RawJob]:

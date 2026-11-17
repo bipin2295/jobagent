@@ -123,13 +123,8 @@ def build_field_values(
         }
     )
 
-    # 3. LinkedIn — prefer profile field, fall back to hardcoded default
-    if contact.linkedin:
-        values["linkedin"] = contact.linkedin
-    else:
-        values.setdefault(
-            "linkedin", "https://linkedin.com/in/bipin-singh-98aa7a129"
-        )
+    # 3. LinkedIn — from the profile only (no hardcoded personal URL)
+    values.setdefault("linkedin", contact.linkedin or "")
 
     # 4. Current company — most recent experience entry
     if profile.experience:

@@ -120,7 +120,7 @@ basics:
   email: bipin2295@gmail.com
   phone: { country_code: "+91", number: ... }
   location: { city: Pune, country: IN }
-  links: { linkedin: linkedin.com/in/bipin-singh-98aa7a129 }
+  links: { linkedin: linkedin.com/in/<your-handle> }   # real value in answers_seed.yaml
   experience_start: 2017-07    # "9+ years" is computed, never hard-coded
 work_authorization:          # used to answer screening questions
   IN: citizen
