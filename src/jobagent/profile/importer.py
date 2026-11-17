@@ -94,7 +94,7 @@ def _parse(text: str, source_path: str = "") -> MasterProfile:
         languages=languages,
         work_authorization=work_auth,
         tailoring_recipes=recipes,
-        file_naming=file_naming or "Bipin_Singh_Data_Engineer_{Company}.pdf",
+        file_naming=file_naming or "Data_Engineer_{Company}.pdf",
         open_items=open_items,
     )
 
@@ -649,7 +649,7 @@ def _parse_education(lines: list[str]) -> list[Education]:
         start_yr = int(year_match[0])
 
     school_raw = kv.get("SCHOOL", "")
-    # "Vishwakarma Institute of Information Technology (VIIT), Pune, India"
+    # "Example Institute of Technology, <City>, <Country>"
     institution = school_raw.split(",")[0].strip()
 
     return [

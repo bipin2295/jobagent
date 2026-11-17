@@ -104,7 +104,7 @@ There is no structured resume yet, and everything downstream depends on good sou
 | `RELOCATION_LINE_TEMPLATE` | Used verbatim in cover letters, with `[CITY]` filled in. |
 | `LANGUAGES` | Hindi native and English fluent go on every resume. Spanish only for ES/LatAm roles (your rule). German is never claimed. |
 | `EDUCATION` + anabin note | Shown on the resume. For DE roles, the answer to "Is your degree recognised?" depends on the anabin check (open item). |
-| `FILE NAMING` | Output PDF is `Bipin_Singh_Data_Engineer_{Company}.pdf`. |
+| `FILE NAMING` | Output PDF is `Data_Engineer_{Company}.pdf`. |
 | `FORM_ONLY` (postal code, DOB) | Only used to fill forms. **Never printed** on the resume. DOB is filled only when the field is *required*. |
 | `SKILL YEARS` | "Years with X" answers: whole years since the first role that shows the skill (9 / 5 / 4 as of Nov 2026). `NOT_YET` → 0. |
 | Note keys (`NOTE`, `BASIS`, `VERIFIED`, `PLACEMENT`, `OPTIONAL`, `INTERVIEW_PREP`) | Treated as **internal notes**: they guide the planner (for example BARC-02's "don't claim you produced the submissions") but are **never printed** or sent to a form. Any key the parser doesn't know is treated the same way. |
@@ -116,10 +116,10 @@ Optional later: a LinkedIn export to cross-check dates, and certifications or pr
 ### 3.2 Format: `data/profile/master_profile.yaml`
 ```yaml
 basics:
-  name: Bipin Singh
-  email: bipin2295@gmail.com
+  name: <Candidate Name>
+  email: <candidate>@example.com
   phone: { country_code: "+91", number: ... }
-  location: { city: Pune, country: IN }
+  location: { city: <City>, country: IN }
   links: { linkedin: linkedin.com/in/<your-handle> }   # real value in answers_seed.yaml
   experience_start: 2017-07    # "9+ years" is computed, never hard-coded
 work_authorization:          # used to answer screening questions
@@ -241,7 +241,7 @@ exclude_titles: [intern, junior, graduate, "principal scientist", "data entry", 
 seniority: [senior, lead, staff]       # 9–10 yrs: mid-level roles are excluded as under-levelled
 max_age_days: 14
 regions:
-  india:   { countries: [IN], cities: [Bengaluru, Hyderabad, Pune, Gurugram, Remote], modes: [onsite, hybrid, remote] }
+  india:   { countries: [IN], cities: [Bengaluru, Hyderabad, Ahmedabad, Gurugram, Remote], modes: [onsite, hybrid, remote] }
   remote:  { modes: [remote], allowed_timezones: ["UTC-1..UTC+12"] }   # EU through APAC working hours
   eu:      { countries: [DE, NL, IE, LU, SE, DK, FI, AT, BE, FR, ES, PT, PL, IT, CZ, EE, LT, SI, CY, MT,
                          HU, RO, BG, HR, SK, LV, GR],                  visa_policy: strict,  require_relocation: preferred }
@@ -509,13 +509,13 @@ This covers ATSs where you must **create an account, verify your email, log in, 
 | **Phenom, Avature, Jobvite, Eightfold, SmartRecruiters (some)** | Medium | Sometimes | Handled by the agent with family hints. |
 
 ### 10A.2 Identity and credential vault
-- **Your main Gmail, `bipin2295@gmail.com`** (decided). Since it's your personal inbox, access is kept tight:
-  - **Per-tenant aliases** with plus-addressing: `bipin2295+acme-workday@gmail.com`. Mail still arrives in your inbox, but every message can be matched to the exact account. If a site rejects `+`, the agent falls back to `bipin2295@gmail.com` and matches mail by sender domain plus time window instead.
-  - **No Gmail filter or label needed.** Every read is a **narrow, server-side search**: either `deliveredto:bipin2295+{tenant}@gmail.com newer_than:2d`, or `from:({ats/company domains}) after:{application time}`. The agent only fetches messages that match an application it made. **Other mail is never fetched or sent to an LLM.**
+- **Your main Gmail, `<candidate>@example.com`** (decided). Since it's your personal inbox, access is kept tight:
+  - **Per-tenant aliases** with plus-addressing: `<candidate>+acme-workday@example.com`. Mail still arrives in your inbox, but every message can be matched to the exact account. If a site rejects `+`, the agent falls back to `<candidate>@example.com` and matches mail by sender domain plus time window instead.
+  - **No Gmail filter or label needed.** Every read is a **narrow, server-side search**: either `deliveredto:<candidate>+{tenant}@example.com newer_than:2d`, or `from:({ats/company domains}) after:{application time}`. The agent only fetches messages that match an application it made. **Other mail is never fetched or sent to an LLM.**
   - **Access method, initial phase (decided): manual sign-in in the browser.** No app passwords. Run `jobagent gmail connect` (or click **Connect Gmail** in the dashboard). Your normal browser opens Google's sign-in and consent page, you log in yourself (including your own 2FA), and you approve **read-only** access (`gmail.readonly`). The agent never sees or stores your Google password. Only the access token is kept, in Keychain.
     - It uses your own free Google Cloud project with the OAuth app in "Testing" status, and you as the only test user (one-time, about 10 minutes, steps in §20).
     - **Expected manual step:** Google expires "Testing" tokens after **7 days**. The preflight check (§10C) catches that and shows **Reconnect Gmail**. One click, sign in again, done. That fits your "keep it manual" choice.
-    - If Gmail isn't connected during a run, email verification falls back to **Auth Assist**: *"Acme Workday sent a verification email to bipin2295+acme-workday@gmail.com, please click it"*. The agent continues automatically once the page moves on.
+    - If Gmail isn't connected during a run, email verification falls back to **Auth Assist**: *"Acme Workday sent a verification email to <candidate>+acme-workday@example.com, please click it"*. The agent continues automatically once the page moves on.
     - Later (optional): IMAP + App Password for fully hands-free access.
   - **Sending** (email-apply channel): **off in the initial phase**, since read-only access can't send. Later it can be turned on with the `gmail.send` scope, capped at 5/day and only to addresses written in the JD.
   - **Never** sign into "Sign in with Google" on ATS sites automatically. If a site only offers Google SSO, it goes to Auth Assist (§10A.3a).
@@ -923,7 +923,7 @@ Each phase ends with something usable. Estimates assume part-time work (evenings
 - **Done when:** these ATSs submit live, unattended, with confirmations captured.
 
 ### Phase 5c: Account agent and Workday (8–12 days), your core pain point
-- `bipin2295+tenant` alias scheme, browser-consent Gmail OAuth (read-only), Keychain vault, `EmailProvider` (Gmail API + Auth Assist fallback + Mailpit), sign-up/login/reset flows.
+- `<candidate>+tenant` alias scheme, browser-consent Gmail OAuth (read-only), Keychain vault, `EmailProvider` (Gmail API + Auth Assist fallback + Mailpit), sign-up/login/reset flows.
 - Page loop (observe → classify → plan → act → verify → checkpoint), LLM agent layer with restricted tools, domain allowlist, budgets.
 - **Workday playbook** (all 6 pages, resume-autofill audit, repeaters, comboboxes).
 - Learned trajectories (record and replay per tenant/page signature).
@@ -993,7 +993,7 @@ Each phase ends with something usable. Estimates assume part-time work (evenings
 | 3b | Visa + relocation | Sponsorship required everywhere outside India; explicit "no relocation" → reject, relocation offered → bonus | §4.3, §6 |
 | 4 | Languages | English only professionally; Spanish A1 (Duolingo, uncertified), disclosed only if asked. Roles **requiring** any other language are rejected | §4.3, profile |
 | 5 | Resume theme | Single ATS-friendly theme for all regions (no photo, DOB or nationality) | §8.1 |
-| 6 | Email | **`bipin2295@gmail.com`** with `+tenant` aliases. **Initial phase: you sign in manually in the browser** (read-only OAuth, reconnect about weekly); Auth Assist when not connected | §10A.2 |
+| 6 | Email | **`<candidate>@example.com`** with `+tenant` aliases. **Initial phase: you sign in manually in the browser** (read-only OAuth, reconnect about weekly); Auth Assist when not connected | §10A.2 |
 | 6a | Profile source | **`~/Documents/resume/master_resume.txt`** is the single source of truth; imported deterministically | §3.1 |
 | 6b | Firecrawl / Apify | Optional, budget-capped **fallbacks** via SDK (free tiers by default); MCP used only during development | §4.3a |
 | 7 | Run mode | **Manual one-click** (▶ Run / `jobagent run`), runs to completion; schedule later | §10C |
@@ -1029,7 +1029,7 @@ Actual values are seeded in `data/profile/answers_seed.yaml` (git-ignored), whic
 
 3. **Gmail** (required for email verification in account-based ATS):
    - console.cloud.google.com → new project `jobagent` → enable Gmail API.
-   - OAuth consent screen: External, Testing mode, add `bipin2295@gmail.com` as test user.
+   - OAuth consent screen: External, Testing mode, add `<candidate>@example.com` as test user.
    - Credentials → Create OAuth client ID → Desktop app → download to `data/secrets/client_secret.json`.
    - `make gmail-connect` → browser opens → sign in → done. Reconnect weekly.
 

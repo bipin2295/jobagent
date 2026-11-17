@@ -2,7 +2,7 @@
 
 Only ever issues **narrow server-side searches** so private emails are never
 fetched or sent to an LLM.  Search scope is always restricted to:
-  - A specific alias (``deliveredto:bipin2295+{tenant}@gmail.com``)
+  - A specific alias (``deliveredto:<candidate>+{tenant}@example.com``)
   - OR a sender domain + time window (``from:{domain} after:{unix_ts}``)
 
 This keeps the read-only OAuth grant meaningful: it cannot be abused to scan
@@ -16,7 +16,7 @@ Usage::
         # fall back to Auth Assist / manual
     else:
         result = await ep.wait_for_verification_email(
-            alias="bipin2295+acme-workday@gmail.com",
+            alias="<candidate>+acme-workday@example.com",
             since=datetime.now(timezone.utc),
             timeout_seconds=600,
         )
@@ -110,7 +110,7 @@ class EmailProvider:
         Parameters
         ----------
         alias:
-            Full ``bipin2295+tenant@gmail.com`` alias. Used in a
+            Full ``<candidate>+tenant@example.com`` alias. Used in a
             ``deliveredto:`` query so we don't scan unrelated mail.
         sender_domain:
             E.g. ``"workday.com"`` or ``"acme.com"``. Combined with

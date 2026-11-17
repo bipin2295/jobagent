@@ -66,7 +66,7 @@ class TestImports:
     def test_account_manager(self):
         from jobagent.apply.account_manager import AccountManager, make_alias
         assert AccountManager is not None
-        assert make_alias("workday", "acme") == "bipin2295+workday-acme@gmail.com"
+        assert make_alias("workday", "acme", base_email="user@example.com") == "user+workday-acme@example.com"
 
     def test_workday_handler(self):
         from jobagent.apply.handlers.workday import WorkdayHandler
@@ -164,7 +164,7 @@ class TestEmailProvider:
         reload(ep)
         provider = ep.EmailProvider()
         result = await provider.wait_for_verification_email(
-            alias="bipin2295+test@gmail.com",
+            alias="user+test@example.com",
             since=datetime.now(timezone.utc),
             timeout_seconds=1,  # very short — should return immediately
         )
@@ -188,12 +188,12 @@ class TestEmailProvider:
     def test_query_builder_alias(self):
         from jobagent.email_provider import _build_query
         q = _build_query(
-            alias="bipin2295+workday-acme@gmail.com",
+            alias="user+workday-acme@example.com",
             sender_domain=None,
             since=datetime(2024, 1, 1, tzinfo=timezone.utc),
             subject_hint="",
         )
-        assert "deliveredto:bipin2295+workday-acme@gmail.com" in q
+        assert "deliveredto:user+workday-acme@example.com" in q
         assert "after:" in q
 
     def test_query_builder_domain(self):
@@ -215,15 +215,15 @@ class TestEmailProvider:
 class TestAccountManager:
     def test_alias_format(self):
         from jobagent.apply.account_manager import make_alias
-        alias = make_alias("workday", "deutschebank")
-        assert alias.startswith("bipin2295+")
-        assert alias.endswith("@gmail.com")
+        alias = make_alias("workday", "deutschebank", base_email="user@example.com")
+        assert alias.startswith("user+")
+        assert alias.endswith("@example.com")
         # Must not be too long for email systems
         assert len(alias) < 80
 
     def test_alias_sanitises_special_chars(self):
         from jobagent.apply.account_manager import make_alias
-        alias = make_alias("workday", "some.company.with.dots")
+        alias = make_alias("workday", "some.company.with.dots", base_email="user@example.com")
         # Dots in the plus portion should be replaced with dashes
         local = alias.split("@")[0].split("+")[1]
         assert "." not in local
@@ -231,7 +231,7 @@ class TestAccountManager:
     def test_alias_truncated(self):
         from jobagent.apply.account_manager import make_alias
         # Very long tenant name should be truncated
-        alias = make_alias("workday", "a" * 100)
+        alias = make_alias("workday", "a" * 100, base_email="user@example.com")
         local = alias.split("@")[0].split("+")[1]
         assert len(local) <= 25  # _ALIAS_SLUG_MAX + ats prefix
 
@@ -249,7 +249,7 @@ class TestAccountManager:
             ats="workday",
             tenant="test-co",
             login_url="https://test-co.wd3.myworkdayjobs.com/login",
-            email_alias="bipin2295+workday-test-co@gmail.com",
+            email_alias="user+workday-test-co@example.com",
             keychain_ref="jobagent/workday/test-co",
             status="active",
             created_at=datetime.now(timezone.utc),
@@ -258,7 +258,7 @@ class TestAccountManager:
         loaded = mgr._load_account("workday", "test-co")
         assert loaded is not None
         assert loaded.status == "active"
-        assert loaded.email_alias == "bipin2295+workday-test-co@gmail.com"
+        assert loaded.email_alias == "user+workday-test-co@example.com"
 
 
 # ---------------------------------------------------------------------------

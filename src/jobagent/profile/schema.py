@@ -201,7 +201,7 @@ class MasterProfile(BaseModel):
     languages: list[Language] = Field(default_factory=list)
     work_authorization: dict[str, str] = Field(default_factory=dict)
     tailoring_recipes: list[TailoringRecipe] = Field(default_factory=list)
-    file_naming: str = "Bipin_Singh_Data_Engineer_{Company}.pdf"
+    file_naming: str = "Data_Engineer_{Company}.pdf"
     open_items: list[str] = Field(default_factory=list)
     compensation: dict[str, CompBand] = Field(default_factory=dict)
 

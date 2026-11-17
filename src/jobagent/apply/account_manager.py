@@ -7,7 +7,7 @@ Handles the full lifecycle:
   4. Log in and return a live browser page for the caller.
   5. Update ``Account`` row with result.
 
-The email alias scheme (``bipin2295+{tenant_slug}@gmail.com``) ensures every
+The email alias scheme (``<candidate>+{tenant_slug}@example.com``) ensures every
 account is distinguishable in the inbox while still delivering to the main
 address.
 
@@ -36,21 +36,47 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-# Base email from which all aliases derive
-_BASE_EMAIL = "bipin2295@gmail.com"
 # Max length of tenant slug portion in the alias
 _ALIAS_SLUG_MAX = 20
 
 
-def make_alias(ats: str, tenant: str) -> str:
-    """Return ``bipin2295+{ats}-{tenant}@gmail.com``.
+def _base_email() -> str:
+    """Return the candidate's base email from the profile or answer seed.
 
-    Truncated to stay inside typical alias-length limits.
-    The ``+`` suffix is ignored by Gmail so mail arrives in the main inbox.
+    Never hardcoded: the real address lives only in the git-ignored profile /
+    ``answers_seed.yaml``.
     """
+    try:
+        from jobagent.profile.loader import load_profile  # noqa: PLC0415
+
+        email = (load_profile().contact.email or "").strip()
+        if email:
+            return email
+    except Exception:
+        pass
+    try:
+        from jobagent.tailor.answers import load_answers_seed  # noqa: PLC0415
+
+        basics = load_answers_seed().get("basics") or {}
+        return str(basics.get("email", "")).strip()
+    except Exception:
+        return ""
+
+
+def make_alias(ats: str, tenant: str, base_email: str | None = None) -> str:
+    """Return ``{local}+{ats}-{tenant}@{domain}`` for the candidate's email.
+
+    Derived from the profile/seed unless *base_email* is supplied (useful for
+    tests). Returns an empty string when no base email is configured. The
+    ``+`` suffix is ignored by Gmail so mail still arrives in the main inbox.
+    """
+    base = (base_email if base_email is not None else _base_email()).strip()
+    if "@" not in base:
+        return ""
+    local, _, domain = base.partition("@")
     slug = re.sub(r"[^a-z0-9]", "-", (f"{ats}-{tenant}").lower())
     slug = slug[:_ALIAS_SLUG_MAX].rstrip("-")
-    return f"bipin2295+{slug}@gmail.com"
+    return f"{local}+{slug}@{domain}"
 
 
 def _tenant_key(ats: str, tenant: str) -> str:

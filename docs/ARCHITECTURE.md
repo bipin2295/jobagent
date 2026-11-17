@@ -39,7 +39,7 @@
 
 ## 1. What this system is
 
-An end-to-end job application agent for one candidate (Bipin Singh, Senior Data Engineer, Pune, India).
+An end-to-end job application agent for one candidate (Senior Data Engineer, based in India).
 It:
 
 1. **Discovers** data-engineering jobs from public ATS boards and job aggregators.
@@ -65,8 +65,8 @@ It:
 
 | Field | Value |
 |---|---|
-| Location | Pune, Maharashtra, India |
-| Email | `bipin2295@gmail.com` (aliases `bipin2295+{tag}@gmail.com`) |
+| Location | India |
+| Email | `<candidate>@example.com` (aliases `<candidate>+{tag}@example.com`) |
 | Experience | Since 2017-07 (9+ years) |
 | Work authorisation | Citizen of India; requires visa sponsorship everywhere else |
 | Blacklisted employers | Cimpress, Vistaprint (`config/blacklist.yaml`) |
@@ -683,7 +683,7 @@ Earlier-phase handlers; accept `manual_mode` but have no manual branch yet.
 | `guardrails.py` | Loads guardrails, caps, cooldowns, `human_like_pause`, active hours, STOP sentinel |
 | `manual.py` | `await_manual_submit()` prompt, `focus_form()` |
 | `verifier.py` | Pre-submit verification helpers |
-| `account_manager.py` | Create / log in / reuse ATS accounts; alias `bipin2295+{ats}-{tenant}@gmail.com`; email verification via `EmailProvider` |
+| `account_manager.py` | Create / log in / reuse ATS accounts; alias `<candidate>+{ats}-{tenant}@example.com`; email verification via `EmailProvider` |
 | `../vault.py` | 24-char generated passwords; macOS keyring, else `data/vault/.keyring.json` (0600) |
 | `../email_provider.py` | Gmail API; **only narrow searches** (`deliveredto:` alias or `from:` domain + `after:`); extracts verify links / OTPs |
 
@@ -809,7 +809,7 @@ python scripts/gmail_connect.py
 ```
 
 One-time setup (already done): Google Cloud project → Gmail API enabled → OAuth **Desktop app** client →
-JSON saved as `data/secrets/client_secret.json` → `bipin2295@gmail.com` added under **Audience → Test users**
+JSON saved as `data/secrets/client_secret.json` → `<candidate>@example.com` added under **Audience → Test users**
 (without this Google returns `403 access_denied`).
 
 ### 20.3 Growing Greenhouse coverage

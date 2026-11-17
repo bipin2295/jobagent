@@ -98,7 +98,7 @@ def _build_candidate_profile_text(profile: MasterProfile) -> str:
 
     Format::
 
-        Name: Bipin Singh
+        Name: <candidate>
         Role: Senior Data Engineer / Analytics Engineer / Lead DE
         Experience: 8 years total (2017–present)
         Current: Senior Data Engineer at Acme

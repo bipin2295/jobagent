@@ -221,7 +221,7 @@ def gmail_connect() -> None:
     console.print("\n[bold cyan]Gmail OAuth — manual flow[/bold cyan]")
     console.print("\n[bold]Step 1:[/bold] Open this URL in your Mac browser:\n")
     console.print(f"  [link]{auth_url}[/link]\n")
-    console.print("[bold]Step 2:[/bold] Sign in as bipin2295@gmail.com → Allow → copy the code.")
+    console.print("[bold]Step 2:[/bold] Sign in with the candidate's Gmail account → Allow → copy the code.")
     console.print("[bold]Step 3:[/bold] Paste the code below and press Enter.\n")
 
     import sys as _sys  # noqa: PLC0415

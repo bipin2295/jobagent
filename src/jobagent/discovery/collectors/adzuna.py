@@ -22,7 +22,7 @@ _BASE_URL = "https://api.adzuna.com/v1/api/jobs"
 # Map search.yaml ISO country code → Adzuna country code.
 # Only countries supported by Adzuna are listed here; others are silently skipped.
 _SUPPORTED_ADZUNA: dict[str, str] = {
-    # US intentionally removed — H-1B lottery makes it impractical for Bipin.
+    # US intentionally removed — H-1B lottery makes it impractical for the candidate.
     # Even if Adzuna has US listings, we'd waste API quota collecting jobs that
     # the country_allowlist filter in filters.py would immediately reject.
     "GB": "gb",

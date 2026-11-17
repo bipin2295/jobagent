@@ -306,7 +306,9 @@ async def _detect_page_type(page: Any) -> str:
 
 async def _fill_login_form(page: Any, answers: dict) -> None:
     """Fill the Workday sign-in form."""
-    email = answers.get("email", "bipin2295@gmail.com")
+    email = answers.get("email", "")
+    if not email:
+        return
     for sel in ["[data-automation-id='email']", "input[type=email]"]:
         el = page.locator(sel).first
         if await el.count() > 0:

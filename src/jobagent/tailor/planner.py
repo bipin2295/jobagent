@@ -84,7 +84,7 @@ def _build_profile_summary(profile: MasterProfile) -> str:
 
     Format::
 
-        Candidate: Bipin Singh
+        Candidate: <candidate>
         Experience: 9 years (2017 – present)
         Current: Senior Data Engineer at Acme (2022-07 – present)
         Key skills: dbt (4yr) snowflake (4yr) python (7yr) ...
