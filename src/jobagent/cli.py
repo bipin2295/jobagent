@@ -615,12 +615,21 @@ def discover_cmd(
     with console.status("[bold green]Running discovery…"):
         new_jobs, updated_jobs = anyio.run(discover_all, search_cfg, only_sources)
 
+    # Resolve aggregator redirect URLs to the real ATS so those jobs become
+    # tailorable (otherwise they stay ats_type=None and are skipped).
+    resolved = attempted = 0
+    from jobagent.pipeline.resolve import resolve_pending  # noqa: PLC0415
+
+    with console.status("[bold green]Resolving aggregator URLs…"):
+        resolved, attempted = anyio.run(resolve_pending, 200, 0)
+
     t = Table(title="Discovery complete", show_header=True)
     t.add_column("Metric", style="cyan")
     t.add_column("Count", justify="right", style="bold")
     t.add_row("New jobs stored", str(new_jobs))
     t.add_row("Existing jobs refreshed", str(updated_jobs))
     t.add_row("Total processed", str(new_jobs + updated_jobs))
+    t.add_row("Aggregator URLs resolved", f"{resolved}/{attempted}")
     if dry_run:
         t.add_row("[yellow]Dry-run mode[/yellow]", "nothing written")
     console.print(t)
@@ -629,6 +638,25 @@ def discover_cmd(
         console.print("[yellow]No jobs found. Check your search config and collector keys.[/yellow]")
     else:
         console.print(f"[green]✓[/green] Run [bold]jobagent status[/bold] to see today's totals.")
+
+
+@app.command("resolve")
+def resolve_cmd(
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Max jobs to resolve.")] = 150,
+) -> None:
+    """Resolve aggregator apply URLs to the real ATS (Greenhouse/Lever/Ashby/Workday)."""
+    import anyio
+    from jobagent.pipeline.resolve import resolve_pending
+
+    with console.status("[bold green]Resolving aggregator URLs…"):
+        resolved, attempted = anyio.run(resolve_pending, limit)
+
+    t = Table(title="URL resolution", show_header=True)
+    t.add_column("Metric", style="cyan")
+    t.add_column("Count", justify="right", style="bold")
+    t.add_row("Attempted", str(attempted))
+    t.add_row("Resolved to a known ATS", str(resolved))
+    console.print(t)
 
 
 @app.command("run")

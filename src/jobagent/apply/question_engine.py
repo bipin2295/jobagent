@@ -330,6 +330,8 @@ def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # 
             "'9 years', especially when the input is numeric.",
             "For any question whose options are numeric ranges (salary, years, "
             "percentage), choose the option whose range contains the known value.",
+            "For 'are you okay with a contract/fixed-term/temporary role' use "
+            "answer_bank.screening.ok_with_contract_roles (true means Yes).",
             "For 'preferred name' use answer_bank.screening.preferred_name if "
             "non-empty, otherwise candidate.first_name.",
             "For 'how did you hear' answer LinkedIn.",

@@ -58,14 +58,13 @@ def _get_queued_jobs(session: Session, limit: int) -> list[tuple[Job, Score | No
         (Job.ats_type.in_(["greenhouse", "lever", "ashby", "smartrecruiters"]), 0),
         else_=1,
     )
-    # Exclude jobs that already have an active tailored or submitted application
-    # so the tailor stage never creates duplicate packages on repeated runs.
+    # Exclude any job that already has an application row, whatever its status.
+    # A package on disk is never rebuilt; retrying an application means resetting
+    # that row to 'tailored', not tailoring again. Excluding only
+    # tailored/submitted re-created duplicates for jobs we had superseded.
     from jobagent.db.models import Application  # noqa: PLC0415
     from jobagent.apply.guardrails import load_guardrails  # noqa: PLC0415
-    already_handled = (
-        select(Application.job_id)
-        .where(Application.status.in_(["tailored", "submitted"]))  # type: ignore[attr-defined]
-    )
+    already_handled = select(Application.job_id)
     stmt = (
         select(Job)
         .where(Job.status == "queued")

@@ -204,7 +204,13 @@ async def _discover(regions: list[str] | None) -> tuple[int, int]:
     only_sources: list[str] | None = guardrails.active_ats if guardrails.active_ats else None
 
     new_jobs, updated = await discover_all(search_cfg, only_sources=only_sources)
-    log.info("discover_done", new=new_jobs, updated=updated)
+
+    # Resolve aggregator redirect URLs to the real ATS so they can be tailored.
+    from jobagent.pipeline.resolve import resolve_pending  # noqa: PLC0415
+
+    resolved, attempted = await resolve_pending(200, 0)
+    log.info("discover_done", new=new_jobs, updated=updated,
+             resolved=resolved, resolve_attempted=attempted)
     return new_jobs, updated
 
 
