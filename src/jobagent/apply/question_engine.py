@@ -126,6 +126,39 @@ async def _combobox_options(scope, frame, field_id: str) -> list[str]:  # type: 
             pass
 
 
+async def _check_current_employment(scope) -> None:  # type: ignore[no-untyped-def]
+    """Tick any "I currently work here" boxes so end-date fields are optional.
+
+    Employment-history widgets (Coinbase, Workday-style) require an end date
+    unless the "currently work here" checkbox is set. Ticking it first removes
+    the impossible "Present" end-date questions.
+    """
+    cbs = scope.locator("input[type='checkbox']")
+    for i in range(await cbs.count()):
+        cb = cbs.nth(i)
+        try:
+            if await cb.is_checked() or not await cb.is_visible():
+                continue
+            cb_id = await cb.get_attribute("id") or ""
+            label = await _label_for(scope, cb_id) if cb_id else ""
+            if not label:
+                label = await cb.evaluate(
+                    "e => (e.closest('label')?.innerText || e.closest('div')?.innerText || '')"
+                )
+            if re.search(
+                r"currently work|current position|i currently|current role|present",
+                label or "",
+                re.IGNORECASE,
+            ):
+                await cb.check(timeout=3000)
+                log.debug(
+                    "question_engine.current_employment_checked",
+                    label=(label or "")[:50],
+                )
+        except Exception:
+            continue
+
+
 async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-untyped-def]
     """Return the visible, empty, required custom controls on the form."""
     fields: list[_Field] = []
@@ -150,7 +183,7 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
             aria = (await el.get_attribute("aria-required") or "").lower()
             if not field_id and aria != "true":
                 continue
-            if not await el.is_visible():
+            if not await el.is_visible() or await el.is_disabled():
                 continue
             if (await el.input_value() or "").strip():
                 continue
@@ -171,7 +204,7 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
             field_id = await el.get_attribute("id") or ""
             if not field_id or field_id in _CORE_IDS:
                 continue
-            if not await el.is_visible():
+            if not await el.is_visible() or await el.is_disabled():
                 continue
             current = (await el.input_value() or "").strip().lower()
             if current and current not in ("", "0", "select...", "select"):
@@ -203,7 +236,7 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
             field_id = await el.get_attribute("id") or ""
             if not field_id or field_id in _CORE_IDS or field_id.startswith("iti-"):
                 continue
-            if not await el.is_visible():
+            if not await el.is_visible() or await el.is_disabled():
                 continue
             ctrl = el.locator(
                 "xpath=ancestor::*[contains(@class,'select__control')]"
@@ -255,6 +288,7 @@ def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # 
         },
         "candidate": {
             "name": contact.name,
+            "first_name": (contact.name.split()[0] if contact.name else ""),
             "email": contact.email,
             "phone": contact.phone,
             "city": contact.location.city,
@@ -296,6 +330,8 @@ def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # 
             "'9 years', especially when the input is numeric.",
             "For any question whose options are numeric ranges (salary, years, "
             "percentage), choose the option whose range contains the known value.",
+            "For 'preferred name' use answer_bank.screening.preferred_name if "
+            "non-empty, otherwise candidate.first_name.",
             "For 'how did you hear' answer LinkedIn.",
             "answer_bank.screening holds the candidate's standing answers to "
             "compliance/preference questions (government official, non-compete, "
@@ -324,6 +360,11 @@ async def answer_custom_questions(
     Returns a list of questions that could not be answered truthfully. An empty
     list means every required custom question was filled.
     """
+    # Tick "currently work here" first: it removes the end-date questions for
+    # the current role before we enumerate required fields.
+    await _check_current_employment(scope)
+    await asyncio.sleep(0.5)
+
     fields = await _collect_fields(scope, frame)
     if not fields:
         return []

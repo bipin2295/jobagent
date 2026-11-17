@@ -160,6 +160,44 @@ class EmailProvider:
                              subject_hint=subject_hint)
         return await asyncio.to_thread(self._list_emails, query, since, max_results)
 
+    async def wait_for_confirmation_email(
+        self,
+        *,
+        since: datetime,
+        company: str | None = None,
+        timeout_seconds: int = 90,
+    ) -> bool:
+        """Return True if a "thank you / application received" email arrived.
+
+        Used as a cross-check when the ATS confirmation page is not detected:
+        a real submission still produces a confirmation email even if the page
+        changes shape. Only messages received at/after *since* are considered,
+        and when *company* is given it must appear in the subject or snippet.
+        """
+        if not self.connected:
+            return False
+
+        query = (
+            'newer_than:2d (subject:"Thank you for applying" OR '
+            'subject:"application received" OR subject:"application submitted" OR '
+            'subject:"Thanks for applying" OR subject:"we received your application")'
+        )
+        deadline = asyncio.get_event_loop().time() + timeout_seconds
+        while asyncio.get_event_loop().time() < deadline:
+            results = await asyncio.to_thread(self._list_emails, query, since, 10)
+            for r in results:
+                hay = f"{r.subject} {r.snippet}".lower()
+                if company and company.lower() not in hay:
+                    continue
+                log.info(
+                    "email_provider.confirmation_found",
+                    subject=r.subject[:70],
+                    company=company,
+                )
+                return True
+            await asyncio.sleep(10)
+        return False
+
     # ── Gmail API helpers (run in thread) ─────────────────────────────────────
 
     def _search_once(self, query: str, since: datetime) -> EmailResult:

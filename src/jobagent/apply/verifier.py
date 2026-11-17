@@ -171,7 +171,7 @@ async def verify_form(
         for i in range(await required.count()):
             el = required.nth(i)
             try:
-                if not await el.is_visible():
+                if not await el.is_visible() or await el.is_disabled():
                     continue
                 # Skip id-less mirror inputs (React-select / native-select
                 # shadow inputs carry a `required` attribute but are not
@@ -199,6 +199,27 @@ async def verify_form(
                 continue
     except Exception as exc:
         log.warning("verifier.required_check_failed", app_id=app.id, error=str(exc))
+
+    # ── Required location combobox ────────────────────────────────────────
+    # The Location (City) field is a required React-select; the generic
+    # required-field loop skips comboboxes (their visible input stays empty
+    # while a committed value lives elsewhere). Check it explicitly so an
+    # empty location is caught before submit, not by browser validation.
+    try:
+        loc = target.locator("#candidate-location")
+        if await loc.count() > 0 and await loc.first.is_visible():
+            ctrl = loc.first.locator(
+                "xpath=ancestor::*[contains(@class,'select__control')]"
+            ).first
+            committed = (
+                await ctrl.count() > 0
+                and await ctrl.locator(".select__single-value").count() > 0
+            )
+            if not committed and not (await loc.first.input_value() or "").strip():
+                issues.append("Location (City) is empty")
+                log.debug("verifier.location_empty", app_id=app.id)
+    except Exception as exc:
+        log.debug("verifier.location_check_failed", app_id=app.id, error=str(exc)[:80])
 
     # ── Resume attachment check ───────────────────────────────────────────
     try:

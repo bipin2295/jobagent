@@ -94,6 +94,111 @@ async def _fill_phone(scope, phone: str) -> bool:  # type: ignore[no-untyped-def
         return False
 
 
+async def _validation_errors(scope) -> list[str]:  # type: ignore[no-untyped-def]
+    """Collect visible validation messages after a blocked submit."""
+    import re as _re  # noqa: PLC0415
+
+    found: list[str] = []
+    for sel in ("[aria-invalid='true']", "[role='alert']", ".error", "[class*='error']"):
+        loc = scope.locator(sel)
+        for i in range(min(await loc.count(), 6)):
+            try:
+                text = (await loc.nth(i).inner_text()).strip()
+                if text:
+                    found.append(_re.sub(r"\s+", " ", text)[:140])
+            except Exception:
+                continue
+    try:
+        body = await scope.inner_text()
+        for line in body.splitlines():
+            text = line.strip()
+            if _re.search(
+                r"this field is required|please enter|is required|invalid|must be",
+                text,
+                _re.IGNORECASE,
+            ):
+                found.append(text[:140])
+    except Exception:
+        pass
+    return list(dict.fromkeys(found))[:8]
+
+
+async def _resume_attached(scope, filename: str) -> bool:  # type: ignore[no-untyped-def]
+    """True when a file input holds a file or the filename is shown on the form."""
+    inputs = scope.locator("input[type=file]")
+    for i in range(await inputs.count()):
+        try:
+            if await inputs.nth(i).evaluate("e => (e.files ? e.files.length : 0)"):
+                return True
+        except Exception:
+            continue
+    try:
+        return filename.lower() in (await scope.inner_text()).lower()
+    except Exception:
+        return False
+
+
+async def _upload_resume(page, scope, path) -> bool:  # type: ignore[no-untyped-def]
+    """Upload the resume through the tenant's widget and verify it stuck.
+
+    Some React uploaders reset the file input after a programmatic
+    ``set_input_files`` (so ``files.length`` returns 0 and the field stays
+    "required"). Try the specific resume inputs, then a real file-chooser
+    click, then any file input — verifying after each.
+    """
+    p = Path(path)
+    if not p.exists():
+        log.warning("greenhouse.resume_missing", path=str(p))
+        return False
+
+    for sel in (
+        "input[type=file][id='resume']",
+        "input[type=file][name*='resume' i]",
+        "input[type=file][id*='resume' i]",
+    ):
+        loc = scope.locator(sel)
+        if await loc.count() == 0:
+            continue
+        try:
+            await loc.first.set_input_files(str(p), timeout=8000)
+        except Exception:
+            pass
+        await asyncio.sleep(1.5)
+        if await _resume_attached(scope, p.name):
+            log.info("greenhouse.resume_uploaded", method="direct", path=str(p))
+            return True
+
+    for text in ("Attach", "Upload", "Choose file", "Add resume", "Upload resume"):
+        btn = scope.get_by_role("button", name=text)
+        if await btn.count() == 0:
+            continue
+        try:
+            async with page.expect_file_chooser(timeout=6000) as fc_info:
+                await _click_robust(btn.first)
+            chooser = await fc_info.value
+            await chooser.set_files(str(p))
+        except Exception:
+            continue
+        await asyncio.sleep(2)
+        if await _resume_attached(scope, p.name):
+            log.info("greenhouse.resume_uploaded", method=f"chooser:{text}", path=str(p))
+            return True
+
+    any_input = scope.locator("input[type=file]")
+    if await any_input.count() > 0:
+        try:
+            await any_input.first.set_input_files(str(p), timeout=8000)
+            await asyncio.sleep(1.5)
+        except Exception:
+            pass
+        if await _resume_attached(scope, p.name):
+            log.info("greenhouse.resume_uploaded", method="fallback", path=str(p))
+            return True
+
+    log.warning("greenhouse.resume_upload_failed", path=str(p))
+    return False
+
+
 async def _handle_security_code(page, scope, since, ) -> bool:  # type: ignore[no-untyped-def]
     """Complete Greenhouse's post-submit email security-code step.
 
@@ -1221,6 +1326,24 @@ class GreenhouseHandler(ApplyHandlerBase):
                             field=_key,
                         )
 
+                # Resume is mandatory on Greenhouse forms; upload through the
+                # tenant's widget and verify it actually attached.
+                if resume_path is not None:
+                    if not await _upload_resume(page, fill_scope, resume_path):
+                        await page.screenshot(
+                            path=str(shot_dir / "step_resume_failed.png")
+                        )
+                        return ApplyResult(
+                            success=False,
+                            application_id=app.id,
+                            status="failed",
+                            error=(
+                                "Resume upload failed: the file input did not retain "
+                                "the file (field still marked required)."
+                            ),
+                            screenshot_before=shot_dir / "step_resume_failed.png",
+                        )
+
                 # ── Step 6: Upload cover letter ──────────────────────────────
                 cl_path = package_dir / "cover_letter.txt"
                 if cl_path.exists():
@@ -1241,6 +1364,11 @@ class GreenhouseHandler(ApplyHandlerBase):
                         if await cl_upload.count() > 0:
                             await cl_upload.first.set_input_files(str(cl_path))
                             log.debug("greenhouse.cover_letter_uploaded_file")
+
+                # Location autocomplete needs a city. Older tailored packages
+                # predate the "city" answer, so fall back to the profile value.
+                if not answers.get("city"):
+                    answers["city"] = field_values.get("city", "")
 
                 # ── Step 7: EEO dropdowns ────────────────────────────────────
                 # Pass form_frame so portalled (document.body) React-select
@@ -1473,6 +1601,23 @@ class GreenhouseHandler(ApplyHandlerBase):
                             log.info("greenhouse.iframe_form_reset_confirmed", job_id=job.id)
                     except Exception:
                         pass
+                # Cross-check via email: a real submission produces a
+                # confirmation mail even when the page's confirmation UI is
+                # not recognised.
+                if not confirmed:
+                    try:
+                        from jobagent.email_provider import EmailProvider  # noqa: PLC0415
+
+                        provider = EmailProvider()
+                        if provider.connected:
+                            confirmed = await provider.wait_for_confirmation_email(
+                                since=submitted_at,
+                                company=_company_name(job),
+                                timeout_seconds=75,
+                            )
+                    except Exception:
+                        log.debug("greenhouse.confirm_email_check_failed", job_id=job.id)
+
                 if confirmed:
                     log.info("greenhouse.submitted", job_id=job.id, url=page.url)
                     return ApplyResult(
@@ -1486,11 +1631,19 @@ class GreenhouseHandler(ApplyHandlerBase):
                     )
 
                 # Submission click landed on an unexpected page
+                validation = await _validation_errors(fill_scope)
+                if validation:
+                    log.warning(
+                        "greenhouse.submit_blocked", job_id=job.id, errors=validation
+                    )
                 return ApplyResult(
                     success=False,
                     application_id=app.id,
                     status="failed",
-                    error="Confirmation page not detected after submit",
+                    error=(
+                        "Confirmation page not detected after submit"
+                        + (f" | validation: {'; '.join(validation)}" if validation else "")
+                    ),
                     screenshot_before=shot_dir / "step_03_filled.png",
                     screenshot_after=shot_dir / "step_04_after_submit.png",
                 )
