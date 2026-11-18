@@ -24,7 +24,7 @@ import structlog
 from jobagent.apply.base import ApplyHandlerBase, ApplyResult
 from jobagent.apply.browser import new_page
 from jobagent.apply.field_mapper import build_field_values, fill_all_common_fields
-from jobagent.apply.guardrails import human_like_pause, shadow_mode_gate
+from jobagent.apply.guardrails import human_like_pause
 from jobagent.db.models import Application, Job
 from jobagent.profile.loader import load_profile
 
@@ -194,9 +194,7 @@ class LeverHandler(ApplyHandlerBase):
                 await page.screenshot(path=str(shot_dir / "step_02_form.png"))
 
                 # ── Step 3: CAPTCHA check (pre-fill) ────────────────────────
-                if await page.locator(
-                    ".g-recaptcha, [data-sitekey], iframe[src*='recaptcha']"
-                ).count() > 0:
+                if await visible_captcha(page):
                     await page.screenshot(path=str(shot_dir / "step_captcha_blocked.png"))
                     return ApplyResult(
                         success=False,
@@ -253,8 +251,6 @@ class LeverHandler(ApplyHandlerBase):
                         screenshot_before=shot_dir / "step_03_filled.png",
                     )
 
-                await shadow_mode_gate()
-
                 # ── Step 10: Find and click Submit ───────────────────────────
                 # Lever typically uses input[type='submit'] or button[type='submit']
                 submit_btn = page.locator(
@@ -282,9 +278,7 @@ class LeverHandler(ApplyHandlerBase):
                 await page.screenshot(path=str(shot_dir / "step_04_after_submit.png"))
 
                 # ── Step 12: CAPTCHA check (post-submit) ─────────────────────
-                if await page.locator(
-                    ".g-recaptcha, [data-sitekey], iframe[src*='recaptcha']"
-                ).count() > 0:
+                if await visible_captcha(page):
                     return ApplyResult(
                         success=False,
                         application_id=app.id,

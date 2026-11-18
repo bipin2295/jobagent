@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import json
 import traceback
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import structlog
@@ -27,7 +26,17 @@ import structlog
 from jobagent.apply.base import ApplyHandlerBase, ApplyResult
 from jobagent.apply.browser import new_page
 from jobagent.apply.field_mapper import build_field_values, fill_all_common_fields
-from jobagent.apply.guardrails import human_like_pause, shadow_mode_gate
+from jobagent.apply.form_utils import (
+    click_robust as _click_robust,
+    confirm_via_email,
+    dismiss_consent as _dismiss_consent,
+    form_country_mismatch as _form_country_mismatch,
+    handle_security_code as _handle_security_code,
+    submitted_at_now,
+    upload_resume as _upload_resume,
+    validation_errors as _validation_errors,
+)
+from jobagent.apply.guardrails import human_like_pause
 from jobagent.apply.manual import await_manual_submit, focus_form
 from jobagent.apply.question_engine import answer_custom_questions
 from jobagent.apply.verifier import verify_form
@@ -35,19 +44,7 @@ from jobagent.db.engine import get_session
 from jobagent.db.models import Application, Company, Job
 from jobagent.profile.loader import load_profile
 
-
-async def _click_robust(loc, timeout: int = 8000) -> None:  # type: ignore[no-untyped-def]
-    """Click *loc*, falling back to a forced click if something intercepts it.
-
-    React-select menus, sticky headers and the floating reCAPTCHA badge often
-    sit over form controls. A normal click then fails its hit-target check and
-    the question goes unanswered, so retry with ``force`` (which skips that
-    check) before giving up.
-    """
-    try:
-        await loc.click(timeout=timeout)
-    except Exception:
-        await loc.click(timeout=timeout, force=True)
+log = structlog.get_logger(__name__)
 
 
 async def _fill_phone(scope, phone: str) -> bool:  # type: ignore[no-untyped-def]
@@ -92,220 +89,6 @@ async def _fill_phone(scope, phone: str) -> bool:  # type: ignore[no-untyped-def
         return bool((await target.input_value() or "").strip())
     except Exception:
         return False
-
-
-async def _form_country_mismatch(scope, job) -> str | None:  # type: ignore[no-untyped-def]
-    """Return an ISO code if the form asks to work in a different country.
-
-    Greenhouse custom questions often read "Are you legally authorized to work
-    in <country>?". If that country is neither the candidate's home country nor
-    the job's country, the posting is for a role we cannot take (e.g. a Peru
-    role tagged as Belgium), so the caller aborts before submitting.
-    """
-    import re as _re  # noqa: PLC0415
-
-    from jobagent.pipeline.normalise import detect_country  # noqa: PLC0415
-
-    try:
-        text = await scope.inner_text()
-    except Exception:
-        return None
-
-    job_country = (job.country or "").upper()
-    for m in _re.finditer(
-        r"(?:authori[sz]ed|eligible|permitted|right)\s+to\s+work\s+in\s+([^\n?.!;]{2,40})",
-        text,
-        _re.IGNORECASE,
-    ):
-        iso = detect_country(m.group(1).strip())
-        if not iso or iso == "IN":
-            continue
-        if job_country and iso == job_country:
-            continue
-        return iso
-    return None
-
-
-async def _validation_errors(scope) -> list[str]:  # type: ignore[no-untyped-def]
-    """Collect visible validation messages after a blocked submit."""
-    import re as _re  # noqa: PLC0415
-
-    found: list[str] = []
-    for sel in ("[aria-invalid='true']", "[role='alert']", ".error", "[class*='error']"):
-        loc = scope.locator(sel)
-        for i in range(min(await loc.count(), 6)):
-            try:
-                text = (await loc.nth(i).inner_text()).strip()
-                if text:
-                    found.append(_re.sub(r"\s+", " ", text)[:140])
-            except Exception:
-                continue
-    try:
-        body = await scope.inner_text()
-        for line in body.splitlines():
-            text = line.strip()
-            if _re.search(
-                r"this field is required|please enter|is required|invalid|must be",
-                text,
-                _re.IGNORECASE,
-            ):
-                found.append(text[:140])
-    except Exception:
-        pass
-    return list(dict.fromkeys(found))[:8]
-
-
-async def _resume_attached(scope, filename: str) -> bool:  # type: ignore[no-untyped-def]
-    """True when a file input holds a file or the filename is shown on the form."""
-    inputs = scope.locator("input[type=file]")
-    for i in range(await inputs.count()):
-        try:
-            if await inputs.nth(i).evaluate("e => (e.files ? e.files.length : 0)"):
-                return True
-        except Exception:
-            continue
-    try:
-        return filename.lower() in (await scope.inner_text()).lower()
-    except Exception:
-        return False
-
-
-async def _upload_resume(page, scope, path) -> bool:  # type: ignore[no-untyped-def]
-    """Upload the resume through the tenant's widget and verify it stuck.
-
-    Some React uploaders reset the file input after a programmatic
-    ``set_input_files`` (so ``files.length`` returns 0 and the field stays
-    "required"). Try the specific resume inputs, then a real file-chooser
-    click, then any file input — verifying after each.
-    """
-    p = Path(path)
-    if not p.exists():
-        log.warning("greenhouse.resume_missing", path=str(p))
-        return False
-
-    for sel in (
-        "input[type=file][id='resume']",
-        "input[type=file][name*='resume' i]",
-        "input[type=file][id*='resume' i]",
-    ):
-        loc = scope.locator(sel)
-        if await loc.count() == 0:
-            continue
-        try:
-            await loc.first.set_input_files(str(p), timeout=8000)
-        except Exception:
-            pass
-        await asyncio.sleep(1.5)
-        if await _resume_attached(scope, p.name):
-            log.info("greenhouse.resume_uploaded", method="direct", path=str(p))
-            return True
-
-    for text in ("Attach", "Upload", "Choose file", "Add resume", "Upload resume"):
-        btn = scope.get_by_role("button", name=text)
-        if await btn.count() == 0:
-            continue
-        try:
-            async with page.expect_file_chooser(timeout=6000) as fc_info:
-                await _click_robust(btn.first)
-            chooser = await fc_info.value
-            await chooser.set_files(str(p))
-        except Exception:
-            continue
-        await asyncio.sleep(2)
-        if await _resume_attached(scope, p.name):
-            log.info("greenhouse.resume_uploaded", method=f"chooser:{text}", path=str(p))
-            return True
-
-    any_input = scope.locator("input[type=file]")
-    if await any_input.count() > 0:
-        try:
-            await any_input.first.set_input_files(str(p), timeout=8000)
-            await asyncio.sleep(1.5)
-        except Exception:
-            pass
-        if await _resume_attached(scope, p.name):
-            log.info("greenhouse.resume_uploaded", method="fallback", path=str(p))
-            return True
-
-    log.warning("greenhouse.resume_upload_failed", path=str(p))
-    return False
-
-
-async def _handle_security_code(page, scope, since, ) -> bool:  # type: ignore[no-untyped-def]
-    """Complete Greenhouse's post-submit email security-code step.
-
-    Some tenants ask for an 8-character code emailed to the applicant before
-    the application is finalised. Read the code from Gmail and enter it into
-    either the 8 single-character boxes or a single code field, then submit.
-    """
-    inputs = scope.locator("input[maxlength='1']")
-    single_boxes = await inputs.count()
-    field = scope.locator(
-        "input[name*='code' i], input[id*='code' i], "
-        "input[placeholder*='code' i], input[autocomplete='one-time-code']"
-    )
-    has_field = await field.count() > 0
-    if single_boxes < 4 and not has_field:
-        return False
-
-    log.info(
-        "greenhouse.security_code_prompt",
-        single_boxes=single_boxes,
-        single_field=has_field,
-    )
-    try:
-        from jobagent.email_provider import EmailProvider  # noqa: PLC0415
-
-        provider = EmailProvider()
-        if not provider.connected:
-            log.warning("greenhouse.security_code_no_gmail")
-            return False
-        res = await provider.wait_for_verification_email(
-            sender_domain="greenhouse",
-            since=since,
-            timeout_seconds=180,
-            subject_hint="Security",
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("greenhouse.security_code_email_error", error=str(exc)[:120])
-        return False
-
-    otp = (res.otp or "").strip()
-    if not otp:
-        log.warning("greenhouse.security_code_missing")
-        return False
-
-    try:
-        if single_boxes >= len(otp):
-            for i, ch in enumerate(otp):
-                box = inputs.nth(i)
-                try:
-                    await box.fill(ch, timeout=3000)
-                except Exception:
-                    await box.click()
-                    await page.keyboard.type(ch)
-            log.info("greenhouse.security_code_entered_boxes", boxes=len(otp))
-        else:
-            target = field.first
-            await _click_robust(target)
-            await target.fill(otp)
-            log.info("greenhouse.security_code_entered_field")
-    except Exception as exc:  # noqa: BLE001
-        log.warning("greenhouse.security_code_fill_error", error=str(exc)[:120])
-        return False
-
-    await asyncio.sleep(1)
-    for name in ("Submit application", "Submit", "Verify", "Confirm", "Continue"):
-        btn = page.get_by_role("button", name=name)
-        if await btn.count() > 0:
-            try:
-                await _click_robust(btn.first)
-                log.info("greenhouse.security_code_submitted", button=name)
-            except Exception:
-                pass
-            break
-    await asyncio.sleep(6)
-    return True
 
 
 async def _looks_like_application_form(frame) -> bool:  # type: ignore[no-untyped-def]
@@ -366,30 +149,39 @@ async def _form_scope(frame):  # type: ignore[no-untyped-def]
     return frame
 
 
-async def _dismiss_consent(page) -> bool:  # type: ignore[no-untyped-def]
-    """Dismiss a cookie/consent modal if one is covering the page.
+async def _form_scope(frame):  # type: ignore[no-untyped-def]
+    """Narrow the fill/submit target to the element that owns the resume upload.
 
-    These modals use ``aria-modal`` backdrops that intercept pointer events, so
-    any click on the page below them times out. Must therefore run *before* the
-    first real interaction, not just before submit. Best-effort; never raises.
+    Career pages frequently host a job-alert signup widget whose
+    ``first_name``/``email`` inputs sit *earlier* in the DOM than the real
+    application form. Page-wide label lookups therefore fill — and would
+    submit — the newsletter box instead. Scoping to the form that contains the
+    resume ``input[type=file]`` keeps every interaction on the right form.
+
+    Falls back to *frame* when no such container is identifiable, preserving
+    the previous behaviour for simple single-form pages.
+
+    The selectors are deliberately ordered stable-first. A predicate like
+    ``form:has(input[type=file])`` is *not* stable: Greenhouse swaps the file
+    input for a "resume.pdf ✕" chip once the upload completes, so a scope
+    resolved that way silently stops matching mid-flow and every later query
+    returns zero elements. ``#first_name`` survives those re-renders.
     """
     for selector in (
-        "button:text-matches('^(Accept all|Accept All|Accept|I accept|Agree|"
-        "I agree|Got it|OK|Allow all)$', 'i')",
-        ".consent-modal button, .cookie-modal button, .cookie-banner button",
-        "[aria-label='Cookie consent'] button",
-        "[id*='cookie'] button, [class*='cookie'] button",
+        "form#application_form",   # classic Greenhouse boards
+        "form#application-form",   # job-boards.greenhouse.io
+        "form:has(#first_name)",   # stable across re-renders
+        "form:has(input[type=file])",
+        "#application_form",
     ):
         try:
-            btn = page.locator(selector).first
-            if await btn.is_visible(timeout=1000):
-                await btn.click(timeout=5000)
-                await page.wait_for_timeout(600)
-                log.debug("greenhouse.consent_dismissed", selector=selector[:40])
-                return True
+            loc = frame.locator(selector).first
+            if await loc.count() > 0:
+                log.debug("greenhouse.form_scoped", selector=selector)
+                return loc
         except Exception:
             continue
-    return False
+    return frame
 
 
 def _company_name(job: Job) -> str:
@@ -410,12 +202,6 @@ def _company_name(job: Job) -> str:
         return host.removeprefix("www.").removeprefix("jobs.") or "(unknown company)"
     except Exception:
         return "(unknown company)"
-
-log = structlog.get_logger(__name__)
-
-# ---------------------------------------------------------------------------
-# EEO "prefer not to say" option labels (Greenhouse varies by tenant)
-# ---------------------------------------------------------------------------
 
 _EEO_PREFER_NOT: set[str] = {
     "I don't wish to answer",
@@ -1582,7 +1368,7 @@ class GreenhouseHandler(ApplyHandlerBase):
                 log.info("greenhouse.submit_clicked", job_id=job.id)
                 # Capture a lower bound for the security-code email so we only
                 # read the code generated by THIS submission.
-                submitted_at = datetime.now(UTC) - timedelta(seconds=30)
+                submitted_at = submitted_at_now()
                 await submit_btn.first.click(force=True)  # force=True bypasses intercepting overlays
                 # Wait for the page to settle after submit (some Greenhouse tenants
                 # stay at the same URL but remove the form; allow extra time)
@@ -1655,18 +1441,7 @@ class GreenhouseHandler(ApplyHandlerBase):
                 # confirmation mail even when the page's confirmation UI is
                 # not recognised.
                 if not confirmed:
-                    try:
-                        from jobagent.email_provider import EmailProvider  # noqa: PLC0415
-
-                        provider = EmailProvider()
-                        if provider.connected:
-                            confirmed = await provider.wait_for_confirmation_email(
-                                since=submitted_at,
-                                company=_company_name(job),
-                                timeout_seconds=75,
-                            )
-                    except Exception:
-                        log.debug("greenhouse.confirm_email_check_failed", job_id=job.id)
+                    confirmed = await confirm_via_email(_company_name(job), submitted_at)
 
                 if confirmed:
                     log.info("greenhouse.submitted", job_id=job.id, url=page.url)

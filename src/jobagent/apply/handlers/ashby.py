@@ -28,8 +28,18 @@ import structlog
 
 from jobagent.apply.base import ApplyHandlerBase, ApplyResult
 from jobagent.apply.browser import new_page
+from jobagent.apply.form_utils import (
+    visible_captcha,
+    confirm_via_email,
+    form_country_mismatch,
+    submitted_at_now,
+    upload_resume,
+    validation_errors,
+)
+from jobagent.apply.question_engine import answer_custom_questions
+from jobagent.apply.verifier import verify_form
 from jobagent.apply.field_mapper import build_field_values, fill_all_common_fields
-from jobagent.apply.guardrails import human_like_pause, shadow_mode_gate
+from jobagent.apply.guardrails import human_like_pause
 from jobagent.db.models import Application, Job
 from jobagent.profile.loader import load_profile
 
@@ -149,6 +159,28 @@ async def _handle_checkboxes(page) -> None:  # type: ignore[type-arg]
 # ---------------------------------------------------------------------------
 
 
+def _company(job: Job) -> str:
+    """Best-effort company name for confirmation-email matching."""
+    if job.company_id:
+        try:
+            from jobagent.db.engine import get_session  # noqa: PLC0415
+            from jobagent.db.models import Company  # noqa: PLC0415
+
+            with get_session() as session:
+                company = session.get(Company, job.company_id)
+            if company and company.name:
+                return company.name
+        except Exception:
+            pass
+    try:
+        from urllib.parse import urlparse  # noqa: PLC0415
+
+        host = urlparse(job.apply_url or job.url).netloc
+        return host.removeprefix("www.").removeprefix("jobs.") or ""
+    except Exception:
+        return ""
+
+
 class AshbyHandler(ApplyHandlerBase):
     """Apply handler for Ashby-hosted job postings."""
 
@@ -224,9 +256,7 @@ class AshbyHandler(ApplyHandlerBase):
                 await page.screenshot(path=str(shot_dir / "step_03_form.png"))
 
                 # ── Step 4: CAPTCHA check (pre-fill) ────────────────────────
-                if await page.locator(
-                    ".g-recaptcha, [data-sitekey], iframe[src*='recaptcha']"
-                ).count() > 0:
+                if await visible_captcha(page):
                     await page.screenshot(
                         path=str(shot_dir / "step_captcha_blocked.png")
                     )
@@ -243,6 +273,23 @@ class AshbyHandler(ApplyHandlerBase):
                 resume_path = Path(app.resume_path) if app.resume_path else None
                 await fill_all_common_fields(page, field_values, resume_path)
                 await human_like_pause()
+
+                # Ashby uses a custom uploader that can silently drop the file.
+                if resume_path is not None:
+                    if not await upload_resume(page, page, resume_path):
+                        await page.screenshot(
+                            path=str(shot_dir / "step_resume_failed.png")
+                        )
+                        return ApplyResult(
+                            success=False,
+                            application_id=app.id,
+                            status="failed",
+                            error=(
+                                "Resume upload failed: the file input did not "
+                                "retain the file."
+                            ),
+                            screenshot_before=shot_dir / "step_resume_failed.png",
+                        )
 
                 # ── Step 6: Cover letter ─────────────────────────────────────
                 cl_path = package_dir / "cover_letter.txt"
@@ -288,8 +335,60 @@ class AshbyHandler(ApplyHandlerBase):
                 # ── Step 8: Final required checkboxes ────────────────────────
                 await _handle_checkboxes(page)
 
+                # ── Step 8b: Custom questions + country guard ────────────────
+                mismatch = await form_country_mismatch(page, job)
+                if mismatch:
+                    await page.screenshot(
+                        path=str(shot_dir / "step_country_mismatch.png")
+                    )
+                    return ApplyResult(
+                        success=False,
+                        application_id=app.id,
+                        status="failed",
+                        error=(
+                            f"Form asks for work authorization in {mismatch}, "
+                            f"but the job country is {job.country!r}."
+                        ),
+                        screenshot_before=shot_dir / "step_country_mismatch.png",
+                    )
+
+                unresolved = await answer_custom_questions(page, page, job, profile)
+                if unresolved:
+                    await page.screenshot(
+                        path=str(shot_dir / "step_unanswerable.png")
+                    )
+                    return ApplyResult(
+                        success=False,
+                        application_id=app.id,
+                        status="failed",
+                        error=(
+                            "Unanswerable required question(s): "
+                            + "; ".join(unresolved[:6])
+                        ),
+                        screenshot_before=shot_dir / "step_unanswerable.png",
+                    )
+
                 # ── Step 9: Pre-submit screenshot ────────────────────────────
                 await page.screenshot(path=str(shot_dir / "step_05_filled.png"))
+
+                # ── Step 9b: Read-back verification ──────────────────────────
+                verification = await verify_form(
+                    page, app, profile, shot_dir / "step_05_verify.png", scope=page
+                )
+                if not verification.passed:
+                    await page.screenshot(
+                        path=str(shot_dir / "step_05_verify_failed.png")
+                    )
+                    return ApplyResult(
+                        success=False,
+                        application_id=app.id,
+                        status="failed",
+                        error=(
+                            "Pre-submit verifier failed: "
+                            + "; ".join(verification.issues[:6])
+                        ),
+                        screenshot_before=shot_dir / "step_05_verify_failed.png",
+                    )
 
                 # ── Step 10: Shadow mode gate ────────────────────────────────
                 if shadow_mode:
@@ -300,8 +399,6 @@ class AshbyHandler(ApplyHandlerBase):
                         status="shadow_stopped",
                         screenshot_before=shot_dir / "step_05_filled.png",
                     )
-
-                await shadow_mode_gate()
 
                 # ── Step 11: Find and click Submit ───────────────────────────
                 submit_btn = (
@@ -326,6 +423,7 @@ class AshbyHandler(ApplyHandlerBase):
                         screenshot_before=shot_dir / "step_05_filled.png",
                     )
 
+                submitted_at = submitted_at_now()
                 log.info("ashby.submit_clicked", job_id=job.id)
                 await submit_btn.first.click()
                 await page.wait_for_load_state("domcontentloaded", timeout=30_000)
@@ -335,9 +433,7 @@ class AshbyHandler(ApplyHandlerBase):
                 await page.screenshot(path=str(shot_dir / "step_06_after_submit.png"))
 
                 # ── Step 13: CAPTCHA check (post-submit) ─────────────────────
-                if await page.locator(
-                    ".g-recaptcha, [data-sitekey], iframe[src*='recaptcha']"
-                ).count() > 0:
+                if await visible_captcha(page):
                     return ApplyResult(
                         success=False,
                         application_id=app.id,
@@ -361,11 +457,31 @@ class AshbyHandler(ApplyHandlerBase):
                         screenshot_after=shot_dir / "step_06_after_submit.png",
                     )
 
+                # Cross-check Gmail: a real submission still sends a receipt.
+                confirmed = await confirm_via_email(_company(job), submitted_at)
+                if confirmed:
+                    log.info("ashby.submitted_via_email", job_id=job.id)
+                    return ApplyResult(
+                        success=True,
+                        application_id=app.id,
+                        status="submitted",
+                        confirmation_url=page.url,
+                        confirmation_text="Confirmed via confirmation email",
+                        screenshot_before=shot_dir / "step_05_filled.png",
+                        screenshot_after=shot_dir / "step_06_after_submit.png",
+                    )
+
+                validation = await validation_errors(page)
+                if validation:
+                    log.warning("ashby.submit_blocked", job_id=job.id, errors=validation)
                 return ApplyResult(
                     success=False,
                     application_id=app.id,
                     status="failed",
-                    error="Confirmation page not detected after submit",
+                    error=(
+                        "Confirmation page not detected after submit"
+                        + (f" | validation: {'; '.join(validation)}" if validation else "")
+                    ),
                     screenshot_before=shot_dir / "step_05_filled.png",
                     screenshot_after=shot_dir / "step_06_after_submit.png",
                 )

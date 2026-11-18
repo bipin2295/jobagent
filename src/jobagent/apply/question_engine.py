@@ -55,7 +55,7 @@ class FormAnswers(BaseModel):
 class _Field(BaseModel):
     field_id: str
     question: str
-    kind: str  # "text" | "select" | "combobox"
+    kind: str  # "text" | "select" | "combobox" | "yesno"
     options: list[str] = Field(default_factory=list)
 
 
@@ -262,6 +262,40 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
         except Exception:
             continue
 
+    # ── Yes/No button groups (Ashby) ─────────────────────────────────────────
+    # Ashby renders yes/no questions as two <button data-option="yes|no">
+    # elements next to a hidden checkbox — no input and no role=combobox, so
+    # the passes above never saw them and the required field stayed blank.
+    yesno = scope.locator("[data-field-path]:has(button[data-option])")
+    for i in range(await yesno.count()):
+        group = yesno.nth(i)
+        try:
+            if not await group.is_visible():
+                continue
+            pressed = group.locator("button[aria-pressed='true']")
+            if await pressed.count() > 0:
+                continue  # already answered
+            field_id = await group.get_attribute("data-field-path") or ""
+            if not field_id or field_id in _CORE_IDS:
+                continue
+            label = group.locator("label").first
+            question = ""
+            if await label.count() > 0:
+                question = re.sub(r"\s+", " ", (await label.inner_text()).strip())
+            if not question:
+                continue
+            options = await group.locator("button[data-option]").all_inner_texts()
+            fields.append(
+                _Field(
+                    field_id=field_id,
+                    question=question,
+                    kind="yesno",
+                    options=[o.strip() for o in options if o.strip()],
+                )
+            )
+        except Exception:
+            continue
+
     return fields
 
 
@@ -314,9 +348,15 @@ def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # 
             "and relocation support.",
             "For 'authorized to work in <country>' where the country is not the "
             "candidate's home country, answer No.",
+            "A vague form asking 'do you have work authorization to work in that "
+            "country?' (no country named) refers to the JOB's country: answer Yes "
+            "only if the job country is the candidate's home country, otherwise No.",
             "For 'require sponsorship', answer Yes outside the home country.",
             "For salary questions use the answer_bank compensation for the job "
             "country; convert to monthly when asked (annual/12).",
+            "If the question names a CURRENCY that differs from the stored one "
+            "(e.g. asks USD for an India role), still answer — use the REMOTE "
+            "USD band as a reference and state the number only.",
             "For years of experience use candidate.years_experience.",
             "For English level use the candidate's language entry in answer_bank.",
             "For city and country of residence use answer_bank.basics.location.",
@@ -461,6 +501,20 @@ async def _fill_field(scope, frame, field: _Field, answer: str) -> bool:  # type
                 return False
             await el.select_option(label=match)
             return True
+
+        if field.kind == "yesno":
+            group = scope.locator(f"[data-field-path='{field.field_id}']").first
+            want = answer.strip().lower()
+            is_yes = want.startswith(("y", "true")) or "yes" == want
+            is_no = want.startswith(("n", "false")) or "no" == want
+            if not (is_yes or is_no):
+                return False
+            btn = group.locator(f"button[data-option='{'yes' if is_yes else 'no'}']").first
+            if await btn.count() == 0:
+                return False
+            await _click_robust(btn)
+            await asyncio.sleep(0.4)
+            return await group.locator("button[aria-pressed='true']").count() > 0
 
         # combobox (React-select)
         return await _fill_combobox(scope, frame, field.field_id, answer)

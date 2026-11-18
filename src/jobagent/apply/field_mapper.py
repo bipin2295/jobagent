@@ -29,8 +29,11 @@ log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 #: (label_or_placeholder_text, answer_dict_key) pairs tried in order.
-#: The first pattern that resolves to a visible element wins.
-COMMON_FIELD_PATTERNS: list[tuple[str, str]] = [
+#: The first pattern that resolves to a visible element wins. A third, optional
+#: element marks the pattern as an EXACT label match (see ``exact_label``
+#: below) — needed for "Name", which as a substring would also match "First
+#: Name" / "Last Name" and overwrite an already-filled field.
+COMMON_FIELD_PATTERNS: list[tuple[str, str] | tuple[str, str, bool]] = [
     ("First Name", "first_name"),
     ("First name", "first_name"),
     ("Given Name", "first_name"),
@@ -40,6 +43,10 @@ COMMON_FIELD_PATTERNS: list[tuple[str, str]] = [
     ("Surname", "last_name"),
     ("Full Name", "full_name"),
     ("Your name", "full_name"),
+    # Ashby and some single-field forms label the full-name input just
+    # "Name". Must be an EXACT match: as a substring it would also match
+    # "First Name" / "Last Name" and silently overwrite them.
+    ("Name", "full_name", True),
     ("Email", "email"),
     ("Email Address", "email"),
     ("Phone", "phone"),
@@ -149,8 +156,13 @@ async def fill_text_field(
     label_text: str,
     value: str,
     timeout_ms: int = 3_000,
+    exact: bool = False,
 ) -> bool:
     """Try multiple locator strategies to fill a text input.
+
+    *exact* forces an exact (non-substring) label match. Needed for generic
+    labels like "Name" that would otherwise also match "First Name" / "Last
+    Name" and overwrite a field that was already filled correctly.
 
     Returns ``True`` if the field was successfully filled.
     """
@@ -159,7 +171,7 @@ async def fill_text_field(
 
     # Strategy 1: by label
     try:
-        loc = page.get_by_label(label_text, exact=False)
+        loc = page.get_by_label(label_text, exact=exact)
         if await loc.count() > 0:
             target = loc.first
             tag = await target.evaluate("el => el.tagName.toLowerCase()")
@@ -173,6 +185,14 @@ async def fill_text_field(
                 return True
     except Exception:
         pass
+
+    # Strategies 2-4 (placeholder/role/CSS) all do substring matching and
+    # would reintroduce the "Name" vs "First Name" collision — skip them
+    # entirely in exact mode. If the exact label lookup above found nothing,
+    # there is genuinely no such field on this form.
+    if exact:
+        log.debug("field_mapper.exact_field_not_found", label=label_text)
+        return False
 
     # Strategy 2: by placeholder
     try:
@@ -364,7 +384,9 @@ async def fill_all_common_fields(
     """
     results: dict[str, bool] = {}
 
-    for label_text, answer_key in COMMON_FIELD_PATTERNS:
+    for pattern in COMMON_FIELD_PATTERNS:
+        label_text, answer_key = pattern[0], pattern[1]
+        exact = pattern[2] if len(pattern) > 2 else False
         if answer_key == "cover_letter_placeholder":
             # Handled by individual ATS handlers
             continue
@@ -383,7 +405,7 @@ async def fill_all_common_fields(
         if answer_key in results and results[answer_key]:
             continue
 
-        filled = await fill_text_field(page, label_text, value)
+        filled = await fill_text_field(page, label_text, value, exact=exact)
         results[answer_key] = results.get(answer_key, False) or filled
 
     # Upload resume PDF

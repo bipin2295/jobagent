@@ -108,9 +108,14 @@ async def verify_form(
 
     # ── Text content checks ───────────────────────────────────────────────
     try:
-        body_text: str = (
-            await target.inner_text() if scope is not None else await page.inner_text("body")
-        )
+        # ``target`` may itself be a Page (handlers that pass scope=page, e.g.
+        # Ashby/Lever) or a Locator (a scoped form, e.g. Greenhouse's iframe
+        # form). Page.inner_text() requires a selector; Locator.inner_text()
+        # does not — so branch on the object, not on whether scope was given.
+        if hasattr(target, "goto"):  # Page
+            body_text: str = await target.inner_text("body")
+        else:  # Locator
+            body_text = await target.inner_text()
 
         # Read every field value back from the DOM — the form text alone does
         # not include what was typed, and an iframe hides it from the page.
@@ -159,40 +164,44 @@ async def verify_form(
         log.warning("verifier.body_text_failed", app_id=app.id, error=str(exc))
 
     # ── Required-field read-back ──────────────────────────────────────────
-    # Every visible required text/select/textarea must hold a value. React-select
-    # comboboxes are skipped: their visible input stays empty even after a value
-    # is committed, so checking it would produce false failures.
+    # Every visible required text/select/textarea must hold a value.
+    #
+    # The CSS attribute selector `[required]` only matches when the HTML
+    # attribute is literally present. React forms (Ashby confirmed) set the
+    # `.required` DOM PROPERTY via JS without reflecting the attribute, so
+    # that selector silently matched nothing and every required field passed
+    # by default. Read every candidate input/select/textarea back via
+    # `evaluate` and check the property directly.
+    #
+    # React-select comboboxes are skipped: their visible input stays empty
+    # even after a value is committed, so checking it would false-fail.
     try:
-        required = target.locator(
-            "input[required], select[required], textarea[required], "
-            "input[aria-required='true'], select[aria-required='true'], "
-            "textarea[aria-required='true']"
-        )
-        for i in range(await required.count()):
-            el = required.nth(i)
+        candidates = target.locator("input, select, textarea")
+        for i in range(await candidates.count()):
+            el = candidates.nth(i)
             try:
+                info = await el.evaluate(
+                    "e => ({required: !!e.required, ariaRequired: "
+                    "e.getAttribute('aria-required'), id: e.id, name: e.name, "
+                    "type: (e.type||'').toLowerCase(), role: e.getAttribute('role')})"
+                )
+                is_required = info["required"] or (info["ariaRequired"] or "").lower() == "true"
+                if not is_required:
+                    continue
                 if not await el.is_visible() or await el.is_disabled():
                     continue
+                if (info["role"] or "").lower() == "combobox":
+                    continue
+                if info["type"] in ("checkbox", "radio", "file", "hidden", "submit", "button"):
+                    continue
                 # Skip id-less mirror inputs (React-select / native-select
-                # shadow inputs carry a `required` attribute but are not
-                # user-facing fields; flagging them creates false failures).
-                el_id = await el.get_attribute("id") or ""
-                aria_req = (await el.get_attribute("aria-required") or "").lower()
-                if not el_id and aria_req != "true":
-                    continue
-                if (await el.get_attribute("role") or "").lower() == "combobox":
-                    continue
-                field_type = (await el.get_attribute("type") or "").lower()
-                if field_type in ("checkbox", "radio", "file", "hidden", "submit", "button"):
+                # shadow inputs can be marked required but are not the
+                # user-facing field; flagging them creates false failures).
+                if not info["id"] and (info["ariaRequired"] or "").lower() != "true":
                     continue
                 if (await el.input_value() or "").strip():
                     continue
-                ident = (
-                    await el.get_attribute("id")
-                    or await el.get_attribute("name")
-                    or field_type
-                    or "field"
-                )
+                ident = info["id"] or info["name"] or info["type"] or "field"
                 issues.append(f"Required field left empty: {ident}")
                 log.debug("verifier.required_empty", app_id=app.id, field=ident)
             except Exception:
