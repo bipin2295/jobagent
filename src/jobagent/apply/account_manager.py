@@ -83,6 +83,19 @@ def _tenant_key(ats: str, tenant: str) -> str:
     return f"{ats}/{tenant}"
 
 
+def _load_password_for(ats: str, tenant: str) -> str:
+    """Return the stored password for an ATS account, or "" if none exists.
+
+    Read-only: never creates a credential. Used by handler-side form fillers
+    that must log into an account created earlier by AccountManager.
+    """
+    try:
+        pw = CredentialVault().get(ats, tenant)
+        return pw or ""
+    except Exception:
+        return ""
+
+
 class AccountManager:
     """Create, persist and reuse ATS accounts."""
 

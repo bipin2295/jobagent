@@ -70,6 +70,16 @@ _PAGE_INDICATORS: dict[str, list[str]] = {
         "h1:text-matches('thank you|submitted|received', 'i')",
         "h2:text-matches('application.*submitted|successfully submitted', 'i')",
     ],
+    # Workday opens a "Start Your Application" modal with three choices:
+    # Autofill with Resume / Apply Manually / Use My Last Application. It is an
+    # intermediate step, not a form — without this the page classifier returned
+    # "unknown" and the loop aborted on every Workday tenant.
+    "start_application": [
+        "h2:text-matches('start your application', 'i')",
+        "[data-automation-id='applyManually']",
+        "button:text-matches('^Apply Manually$', 'i')",
+        "[data-automation-id='autofillWithResume']",
+    ],
     "login": [
         "[data-automation-id='signIn']",
         "[data-automation-id='username']",
@@ -171,11 +181,70 @@ class WorkdayHandler(ApplyHandlerBase):
 
                 await page.screenshot(path=str(shot_dir / "step_03_apply_start.png"))
 
+                # ── Step 2b: "Start Your Application" modal ───────────────────
+                # Workday then shows three options. "Apply Manually" is the
+                # reliable path: Autofill depends on resume parsing and "Use My
+                # Last Application" needs a prior application on the account.
+                if await _detect_page_type(page) == "start_application":
+                    clicked = False
+                    for sel in (
+                        "button:text-matches('^Apply Manually$', 'i')",
+                        "[data-automation-id='applyManually']",
+                        "a:text-matches('^Apply Manually$', 'i')",
+                    ):
+                        btn = page.locator(sel).first
+                        if await btn.count() > 0 and await btn.is_visible():
+                            try:
+                                await btn.click(timeout=10000)
+                            except Exception:
+                                await btn.click(timeout=10000, force=True)
+                            clicked = True
+                            log.info("workday.apply_manually_clicked", job_id=job.id)
+                            break
+                    if clicked:
+                        await page.wait_for_load_state("domcontentloaded", timeout=20000)
+                        await human_like_pause()
+                        await page.screenshot(
+                            path=str(shot_dir / "step_03b_after_manual.png")
+                        )
+
                 # ── Step 3: Page loop ─────────────────────────────────────────
                 filled_pages: list[str] = []
+                # Track consecutive repeats of the SAME page type. Some steps
+                # legitimately need a second pass (e.g. login retry), but if a
+                # page type recurs this many times we are not making progress.
+                repeat_count = 0
+                previous_type = ""
                 for page_num in range(10):  # max 10 pages
                     page_type = await _detect_page_type(page)
                     log.debug("workday.page_detected", page_num=page_num, page_type=page_type)
+
+                    if page_type == previous_type:
+                        repeat_count += 1
+                    else:
+                        repeat_count = 0
+                        previous_type = page_type
+                    if repeat_count >= 2:
+                        log.warning(
+                            "workday.no_progress",
+                            page_type=page_type,
+                            repeats=repeat_count,
+                            job_id=job.id,
+                        )
+                        await page.screenshot(
+                            path=str(shot_dir / f"step_stuck_{page_type}.png")
+                        )
+                        return ApplyResult(
+                            success=False,
+                            application_id=app.id,
+                            status="blocked" if page_type == "login" else "failed",
+                            error=(
+                                f"Stuck on '{page_type}' page "
+                                f"({repeat_count + 1} attempts without progress). "
+                                "Sign-in may require credentials or email verification."
+                            ),
+                            screenshot_before=shot_dir / f"step_stuck_{page_type}.png",
+                        )
 
                     if page_type == "confirmation":
                         await page.screenshot(path=str(shot_dir / "step_confirm.png"))
@@ -192,6 +261,21 @@ class WorkdayHandler(ApplyHandlerBase):
                     if page_type == "login":
                         # Re-try login (may have been logged out)
                         await _fill_login_form(page, answers)
+                        await human_like_pause()
+                        continue
+
+                    if page_type == "start_application":
+                        # Modal can reappear on later iterations; always take
+                        # the manual path so behaviour is predictable.
+                        for sel in (
+                            "button:text-matches('^Apply Manually$', 'i')",
+                            "[data-automation-id='applyManually']",
+                        ):
+                            btn = page.locator(sel).first
+                            if await btn.count() > 0 and await btn.is_visible():
+                                await btn.click(timeout=10000)
+                                log.info("workday.apply_manually_clicked", job_id=job.id)
+                                break
                         await human_like_pause()
                         continue
 
@@ -314,6 +398,41 @@ async def _fill_login_form(page: Any, answers: dict) -> None:
         if await el.count() > 0:
             await el.fill(email)
             break
+
+    # Workday commonly lands on a "Create Account" step (email + password +
+    # verify password). Filling only the email left the form invalid and the
+    # page loop spun on it until the iteration cap.
+    password = ""
+    try:
+        from jobagent.apply.account_manager import (  # noqa: PLC0415
+            _load_password_for,
+        )
+
+        password = _load_password_for("workday", answers.get("_tenant", "default"))
+    except Exception:
+        password = ""
+    if password:
+        filled = False
+        for sel in [
+            "[data-automation-id='password']",
+            "input[type=password][name*='pass']:not([name*='confirm'])",
+            "input[type=password]",
+        ]:
+            el = page.locator(sel).first
+            if await el.count() > 0 and await el.is_visible():
+                await el.fill(password)
+                filled = True
+                break
+        if filled:
+            for sel in [
+                "[data-automation-id='verifyPassword']",
+                "input[type=password][name*='confirm']",
+                "input[type=password][id*='confirm' i]",
+            ]:
+                el = page.locator(sel).first
+                if await el.count() > 0 and await el.is_visible():
+                    await el.fill(password)
+                    break
 
     btn = page.locator("[data-automation-id='nextBtn']").first
     if await btn.count() > 0:

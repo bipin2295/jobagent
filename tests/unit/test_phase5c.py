@@ -419,6 +419,6 @@ class TestWorkdayHandler:
         valid_types = {
             "my_information", "my_experience", "application_questions",
             "voluntary_disclosures", "review", "confirmation", "login",
-            "create_account",
+            "create_account", "start_application",
         }
         assert set(_PAGE_INDICATORS.keys()) == valid_types

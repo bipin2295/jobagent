@@ -242,6 +242,28 @@ PHASE4 = dedent("""\
 """)
 
 # ---------------------------------------------------------------------------
+# Phase 5 — retire jobs whose apply URL can never be reached
+# ---------------------------------------------------------------------------
+
+#: Aggregator sources whose listings hide the real ATS behind JavaScript or
+#: bot-blocking. Verified empirically: HTTP redirects return 403 or contain no
+#: ATS link, and the browser fallback (clicking through) finds nothing.
+#: Note ``jobspy_indeed`` and ``arbeitnow`` are deliberately EXCLUDED — they
+#: often carry direct company/ATS URLs that *are* resolvable.
+UNREACHABLE_SOURCES: tuple[str, ...] = ("adzuna", "jooble")
+
+PHASE5 = dedent("""\
+    -- 5. Mark queued jobs from JS-only aggregators as filtered_out.
+    --    They cannot be resolved to a real ATS, so they would sit in the queue
+    --    forever and misreport available inventory.
+    UPDATE job
+    SET status='filtered_out'
+    WHERE status='queued'
+      AND ats_type IS NULL
+      AND source IN ('adzuna', 'jooble');
+""")
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -301,6 +323,13 @@ def main() -> None:
         """).fetchone()[0]
         print(f"  job.country backfills:  {n1}")
         print(f"  US jobs to filter_out:  {n2}")
+
+        print("\nPhase 5 — would retire unreachable aggregator jobs")
+        n5 = con.execute(
+            "SELECT count(*) FROM job WHERE status='queued' AND ats_type IS NULL "
+            "AND source IN ('adzuna','jooble')"
+        ).fetchone()[0]
+        print(f"  queued adzuna/jooble to filtered_out:  {n5}")
         print("\nRe-run with --apply to execute.\n")
         return
 
@@ -335,6 +364,10 @@ def main() -> None:
         # Phase 4
         run_sql_block(PHASE4)
         print("Phase 4 done: job.country backfilled / US jobs filtered")
+
+        # Phase 5
+        run_sql_block(PHASE5)
+        print("Phase 5 done: unreachable aggregator jobs retired")
 
     con.execute("PRAGMA wal_checkpoint(FULL)")
     after = snapshot(con)

@@ -65,20 +65,20 @@ def _get_queued_jobs(session: Session, limit: int) -> list[tuple[Job, Score | No
     from jobagent.db.models import Application  # noqa: PLC0415
     from jobagent.apply.guardrails import load_guardrails  # noqa: PLC0415
     already_handled = select(Application.job_id)
+    guardrails = load_guardrails()
     stmt = (
         select(Job)
         .where(Job.status == "queued")
         .where(Job.id.notin_(already_handled))  # type: ignore[attr-defined]
         .order_by(ats_priority, Job.score.desc())  # type: ignore[arg-type]
-        .limit(limit * 5)  # over-fetch so we can filter by active_ats below
+        .limit(limit)
     )
-    all_jobs = list(session.exec(stmt).all())
-
-    # Respect active_ats focus — if set, only tailor jobs with matching ATS
-    guardrails = load_guardrails()
+    # Filter by active_ats in SQL. Post-filtering an over-fetch window silently
+    # returned nothing whenever higher-scoring jobs from an inactive ATS
+    # (e.g. 118 LinkedIn rows) filled that window.
     if guardrails.active_ats:
-        all_jobs = [j for j in all_jobs if j.ats_type in guardrails.active_ats]
-    all_jobs = all_jobs[:limit]  # re-apply original limit
+        stmt = stmt.where(Job.ats_type.in_(guardrails.active_ats))  # type: ignore[attr-defined]
+    all_jobs = list(session.exec(stmt).all())
 
     # Re-build result with score rows for the filtered set
     result2: list[tuple[Job, Score | None]] = []
