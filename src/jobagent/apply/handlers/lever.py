@@ -24,7 +24,17 @@ import structlog
 from jobagent.apply.base import ApplyHandlerBase, ApplyResult
 from jobagent.apply.browser import new_page
 from jobagent.apply.field_mapper import build_field_values, fill_all_common_fields
+from jobagent.apply.form_utils import (
+    confirm_via_email,
+    form_country_mismatch,
+    submitted_at_now,
+    upload_resume,
+    validation_errors,
+    visible_captcha,
+)
 from jobagent.apply.guardrails import human_like_pause
+from jobagent.apply.question_engine import answer_custom_questions
+from jobagent.apply.verifier import verify_form
 from jobagent.db.models import Application, Job
 from jobagent.profile.loader import load_profile
 
@@ -238,8 +248,79 @@ class LeverHandler(ApplyHandlerBase):
                 # ── Step 7: Required checkboxes ──────────────────────────────
                 await _handle_checkboxes(page)
 
-                # ── Step 8: Pre-submit screenshot ────────────────────────────
+                # ── Step 7b: Resume upload verification ──────────────────────
+                # Lever's uploader can silently drop a programmatically-set
+                # file; verify it stuck before continuing.
+                if resume_path is not None:
+                    if not await upload_resume(page, page, resume_path):
+                        await page.screenshot(
+                            path=str(shot_dir / "step_resume_failed.png")
+                        )
+                        return ApplyResult(
+                            success=False,
+                            application_id=app.id,
+                            status="failed",
+                            error=(
+                                "Resume upload failed: the file input did not "
+                                "retain the file."
+                            ),
+                            screenshot_before=shot_dir / "step_resume_failed.png",
+                        )
+
+                # ── Step 7c: Country guard ───────────────────────────────────
+                mismatch = await form_country_mismatch(page, job)
+                if mismatch:
+                    await page.screenshot(
+                        path=str(shot_dir / "step_country_mismatch.png")
+                    )
+                    return ApplyResult(
+                        success=False,
+                        application_id=app.id,
+                        status="failed",
+                        error=(
+                            f"Form asks for work authorization in {mismatch}, "
+                            f"but the job country is {job.country!r}."
+                        ),
+                        screenshot_before=shot_dir / "step_country_mismatch.png",
+                    )
+
+                # ── Step 7d: LLM answer engine for remaining questions ───────
+                unresolved = await answer_custom_questions(page, page, job, profile)
+                if unresolved:
+                    await page.screenshot(
+                        path=str(shot_dir / "step_unanswerable.png")
+                    )
+                    return ApplyResult(
+                        success=False,
+                        application_id=app.id,
+                        status="failed",
+                        error=(
+                            "Unanswerable required question(s): "
+                            + "; ".join(unresolved[:6])
+                        ),
+                        screenshot_before=shot_dir / "step_unanswerable.png",
+                    )
+
+                # ── Step 8: Pre-submit screenshot + verification ──────────────
                 await page.screenshot(path=str(shot_dir / "step_03_filled.png"))
+
+                verification = await verify_form(
+                    page, app, profile, shot_dir / "step_03_verify.png", scope=page
+                )
+                if not verification.passed:
+                    await page.screenshot(
+                        path=str(shot_dir / "step_03_verify_failed.png")
+                    )
+                    return ApplyResult(
+                        success=False,
+                        application_id=app.id,
+                        status="failed",
+                        error=(
+                            "Pre-submit verifier failed: "
+                            + "; ".join(verification.issues[:6])
+                        ),
+                        screenshot_before=shot_dir / "step_03_verify_failed.png",
+                    )
 
                 # ── Step 9: Shadow mode gate ─────────────────────────────────
                 if shadow_mode:
@@ -252,12 +333,15 @@ class LeverHandler(ApplyHandlerBase):
                     )
 
                 # ── Step 10: Find and click Submit ───────────────────────────
-                # Lever typically uses input[type='submit'] or button[type='submit']
+                # Lever pages contain a HIDDEN `#hcaptchaSubmitBtn` alongside the
+                # real submit button. Selecting `.first` therefore matched the
+                # invisible one and the click timed out — visible only failures
+                # (shadow mode never reaches submit, so it passed there).
                 submit_btn = page.locator(
-                    "input[type='submit'], "
-                    "button[type='submit'], "
-                    "button:has-text('Submit Application'), "
-                    "button:has-text('Submit')"
+                    "input[type='submit']:visible, "
+                    "button[type='submit']:visible, "
+                    "button:visible:has-text('Submit Application'), "
+                    "button:visible:has-text('Submit')"
                 )
                 if await submit_btn.count() == 0:
                     await page.screenshot(path=str(shot_dir / "step_no_submit.png"))
@@ -265,12 +349,13 @@ class LeverHandler(ApplyHandlerBase):
                         success=False,
                         application_id=app.id,
                         status="failed",
-                        error="Submit button not found",
+                        error="Submit button not found (no visible submit control)",
                         screenshot_before=shot_dir / "step_03_filled.png",
                     )
 
+                submitted_at = submitted_at_now()
                 log.info("lever.submit_clicked", job_id=job.id)
-                await submit_btn.first.click()
+                await submit_btn.first.click(timeout=15000)
                 await page.wait_for_load_state("domcontentloaded", timeout=30_000)
                 await human_like_pause()
 
@@ -290,6 +375,12 @@ class LeverHandler(ApplyHandlerBase):
 
                 # ── Step 13: Confirmation ────────────────────────────────────
                 confirmed = await _is_confirmation_page(page)
+
+                # Cross-check Gmail: Lever always emails a receipt, even when
+                # the confirmation UI is not recognised.
+                if not confirmed:
+                    confirmed = await confirm_via_email(None, submitted_at)
+
                 if confirmed:
                     log.info("lever.submitted", job_id=job.id, url=page.url)
                     return ApplyResult(
@@ -301,6 +392,10 @@ class LeverHandler(ApplyHandlerBase):
                         screenshot_before=shot_dir / "step_03_filled.png",
                         screenshot_after=shot_dir / "step_04_after_submit.png",
                     )
+
+                validation = await validation_errors(page)
+                if validation:
+                    log.warning("lever.submit_blocked", job_id=job.id, errors=validation)
 
                 return ApplyResult(
                     success=False,

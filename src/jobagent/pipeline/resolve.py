@@ -27,8 +27,23 @@ from jobagent.pipeline.ats_detect import detect_ats
 
 log = structlog.get_logger(__name__)
 
+#: Sources whose listing URLs may hide the real ATS. These are all tried; the
+#: source name is only used to shortlist candidates, never to reject a match.
 _AGGREGATOR_SOURCES = frozenset(
-    {"jooble", "adzuna", "reed", "jobspy", "linkedin", "indeed", "bayt"}
+    {
+        "jooble",
+        "adzuna",
+        "reed",
+        "jobspy",
+        "jobspy_indeed",
+        "jobspy_glassdoor",
+        "jobspy_linkedin",
+        "linkedin",
+        "indeed",
+        "bayt",
+        "arbeitnow",
+        "mycareersfuture",
+    }
 )
 
 _USER_AGENT = (
@@ -80,6 +95,27 @@ async def _resolve_one_http(
         ats = detect_ats(link)
         if ats and ats != "unknown":
             return ats, link
+
+    # Some boards expose a dedicated "/apply" endpoint that 302s straight to
+    # the employer's ATS. arbeitnow does this for every listing (verified: 13/13
+    # resolved to Lever/Ashby/Greenhouse/join.com), and the listing page itself
+    # contains no ATS link at all. Try it for any unresolved board URL.
+    if not final.rstrip("/").endswith("/apply"):
+        apply_variant = final.rstrip("/") + "/apply"
+        try:
+            resp2 = await client.get(apply_variant, follow_redirects=True)
+            final2 = str(resp2.url)
+            ats = detect_ats(final2)
+            if ats and ats != "unknown":
+                log.debug(
+                    "resolve.via_apply_endpoint",
+                    job_id=job.id,
+                    url=final2[:90],
+                )
+                return ats, final2
+        except Exception:
+            pass
+
     return None, None
 
 
@@ -90,6 +126,10 @@ def _candidates(limit: int) -> list[int]:
             .where(Job.ats_type.is_(None))  # type: ignore[union-attr]
             .where(Job.apply_url.is_not(None))  # type: ignore[union-attr]
             .where(Job.source.in_(_AGGREGATOR_SOURCES))  # type: ignore[attr-defined]
+            # Only jobs still in the pipeline: retired/filtered rows would
+            # otherwise consume the whole budget (adzuna/jooble are numerous
+            # and outrank everything on score).
+            .where(Job.status == "queued")
             .order_by(Job.score.desc())
             .limit(limit)
         )

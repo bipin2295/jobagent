@@ -77,21 +77,37 @@ def _years_experience(seed: dict) -> int:
 
 
 async def _label_for(scope, field_id: str) -> str:  # type: ignore[no-untyped-def]
-    """Best-effort visible question text for the control with *field_id*."""
+    """Best-effort visible question text for the control with *field_id*.
+
+    *field_id* may be an element id or an Ashby ``data-field-path`` value.
+    """
     lbl = scope.locator(f"label[for='{field_id}']")
     if await lbl.count() > 0:
         text = (await lbl.first.inner_text()).strip()
         if text:
             return re.sub(r"\s+", " ", text)
-    inp = scope.locator(f"[id='{field_id}']").first
+
+    # data-field-path wrapper: the question is the wrapper's <label>.
+    wrapper = scope.locator(f"[data-field-path='{field_id}']")
+    if await wrapper.count() > 0:
+        inner = wrapper.first.locator("label").first
+        if await inner.count() > 0:
+            text = (await inner.inner_text()).strip()
+            if text:
+                return re.sub(r"\s+", " ", text)
+
+    inp = scope.locator(f"[id='{field_id}']")
+    if await inp.count() == 0:
+        inp = scope.locator(f"[data-field-path='{field_id}'] input, [data-field-path='{field_id}'] textarea")
+    target = inp.first
     try:
-        aria = await inp.get_attribute("aria-label")
+        aria = await target.get_attribute("aria-label")
         if aria:
             return aria.strip()
     except Exception:
         pass
     try:
-        text = await inp.evaluate(
+        text = await target.evaluate(
             "e => (e.closest('div')?.innerText || '')"
         )
         return re.sub(r"\s+", " ", (text or "").strip())[:300]
@@ -164,15 +180,26 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
     fields: list[_Field] = []
 
     # ── text / textarea ──────────────────────────────────────────────────────
+    # Ashby marks questions "required" only via CSS classes and often omits the
+    # `id`, so neither `[required]` nor `[aria-required]` matches. Walk every
+    # visible empty text control and resolve its label from the enclosing
+    # field-entry wrapper instead.
     text_loc = scope.locator(
         "input[aria-required='true'], textarea[aria-required='true'], "
-        "input[required], textarea[required]"
+        "input[required], textarea[required], "
+        "[data-field-path] input[type='text'], [data-field-path] input[type='number'], "
+        "[data-field-path] input[type='url'], [data-field-path] textarea, "
+        "[data-field-entry-id] input:not([type='hidden']), "
+        "[data-field-entry-id] textarea"
     )
+    seen_text: set[str] = set()
     for i in range(await text_loc.count()):
         el = text_loc.nth(i)
         try:
             field_id = await el.get_attribute("id") or ""
-            if not field_id or field_id in _CORE_IDS:
+            if field_id and field_id in _CORE_IDS:
+                continue
+            if field_id and field_id.startswith("iti-"):
                 continue
             role = (await el.get_attribute("role") or "").lower()
             if role == "combobox":
@@ -180,13 +207,24 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
             field_type = (await el.get_attribute("type") or "").lower()
             if field_type in _SKIP_INPUT_TYPES:
                 continue
-            aria = (await el.get_attribute("aria-required") or "").lower()
-            if not field_id and aria != "true":
-                continue
             if not await el.is_visible() or await el.is_disabled():
                 continue
             if (await el.input_value() or "").strip():
                 continue
+
+            # Fall back to the wrapper's data-field-path when the input has no
+            # id — that is exactly how Ashby renders custom text questions.
+            if not field_id:
+                field_id = (
+                    await el.evaluate(
+                        "e => { const w = e.closest('[data-field-path]'); "
+                        "return w ? w.getAttribute('data-field-path') : ''; }"
+                    )
+                    or ""
+                )
+            if not field_id or field_id in seen_text:
+                continue
+            seen_text.add(field_id)
             question = await _label_for(scope, field_id)
             if not question:
                 continue
@@ -299,8 +337,76 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
     return fields
 
 
+_SALARY_RE = re.compile(
+    r"salary|compensation|remuneration|pay\s+expectation|expected\s+pay|"
+    r"gross\s+(?:salary|pay)|annual\s+(?:salary|pay)|daily\s+rate|day\s+rate",
+    re.IGNORECASE,
+)
+
+_EUROPE = frozenset(
+    "DE NL FR IE LU SE DK FI AT BE ES PT PL IT CZ EE LT SI CY MT HU RO BG "
+    "HR SK LV GR CH NO IS GB UK".split()
+)
+
+
+def _is_salary_question(question: str) -> bool:
+    return bool(_SALARY_RE.search(question or ""))
+
+
+def _salary_answer_for(job: Any, question: str, seed: dict) -> str | None:  # noqa: ANN401
+    """Return a formatted salary answer for *question*, or None if unknown.
+
+    Uses the job country's band, falling back to a regional default, then to
+    REMOTE (USD). Emits a bare number plus the period the question asks for,
+    because ATS salary fields are usually numeric inputs.
+    """
+    comp = (seed.get("compensation") or {})
+    country = (getattr(job, "country", None) or "").upper()
+
+    key: str | None = None
+    if country and country in comp:
+        key = country
+    elif country == "GB":
+        key = "UK"
+    elif country in _EUROPE:
+        key = "DE"
+    elif country == "IN":
+        key = "IN"
+    elif comp.get("REMOTE"):
+        key = "REMOTE"
+
+    block = comp.get(key) if key else None
+    if not isinstance(block, dict):
+        return None
+
+    # India stores CTC in lakhs rather than a plain annual figure.
+    if key == "IN" and block.get("expected") is None:
+        lpa = block.get("expected_ctc_lpa")
+        if lpa is None:
+            return None
+        return f"{int(float(lpa) * 100000)} INR per year"
+
+    expected = block.get("expected")
+    if expected is None:
+        return None
+    period = str(block.get("period", "year")).lower()
+
+    q = (question or "").lower()
+    if "month" in q:
+        value = float(expected) / 12
+        unit = "per month"
+    elif "day" in q or "daily" in q:
+        value = float(expected) / 260
+        unit = "per day"
+    else:
+        value = float(expected)
+        unit = "per year"
+
+    text = f"{value:.0f}" if abs(value - round(value)) < 0.01 else f"{value:.2f}"
+    return f"{text} {block.get('currency', '')} {unit}".strip()
+
+
 def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # noqa: ANN401
-    """Compact, grounded context for the answerer. Never includes guesses."""
     contact = profile.contact
     # Include ALL skills: forms ask about specific ones (Docker, dbt, …) that a
     # top-N cut would hide, causing false "unanswerable" results.
@@ -354,12 +460,28 @@ def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # 
             "For 'require sponsorship', answer Yes outside the home country.",
             "For salary questions use the answer_bank compensation for the job "
             "country; convert to monthly when asked (annual/12).",
+            "ALWAYS answer a salary question from answer_bank.compensation. Use "
+            "the entry for the job country; if that country is absent, use DE "
+            "(EUR) when the job is in Europe, REMOTE (USD) otherwise. The stored "
+            "'expected' value is ANNUAL gross — use it as-is for 'annual', "
+            "divide by 12 for 'monthly', divide by 12 for 'per month'.",
+            "A salary question is answerable whenever answer_bank.compensation "
+            "has an entry for the job country or a regional default — do NOT "
+            "report it unanswerable merely because the question says 'annual'.",
             "If the question names a CURRENCY that differs from the stored one "
             "(e.g. asks USD for an India role), still answer — use the REMOTE "
             "USD band as a reference and state the number only.",
             "For years of experience use candidate.years_experience.",
             "For English level use the candidate's language entry in answer_bank.",
             "For city and country of residence use answer_bank.basics.location.",
+            "For 'current country and city of residence' answer "
+            "'India, <city>' from answer_bank.basics.location.",
+            "For 'earliest possible start date' use "
+            "answer_bank.screening.earliest_start_date.",
+            "For 'first line of your address' / address line 1 use "
+            "answer_bank.screening.street_address; if that is empty, answer with "
+            "the city and country from answer_bank.basics.location instead of "
+            "reporting it unanswerable.",
             "For GPA use answer_bank.education.gpa. If the question offers "
             "ranges, pick the range that contains the value on the SAME scale as "
             "the options: use education.gpa_20 for a 0-20 scale, education.gpa_10 "
@@ -374,6 +496,13 @@ def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # 
             "answer_bank.screening.ok_with_contract_roles (true means Yes).",
             "For 'preferred name' use answer_bank.screening.preferred_name if "
             "non-empty, otherwise candidate.first_name.",
+            "For 'able/willing to work remotely' use "
+            "answer_bank.screening.willing_to_work_remotely (true = Yes).",
+            "For 'are you related to any current employees' use "
+            "answer_bank.screening.related_to_employees (false = No).",
+            "For consent to interview recording / AI note-takers / interview "
+            "integrity tools use "
+            "answer_bank.screening.consent_interview_recording (true = Yes).",
             "For 'how did you hear' answer LinkedIn.",
             "answer_bank.screening holds the candidate's standing answers to "
             "compliance/preference questions (government official, non-compete, "
@@ -453,6 +582,25 @@ async def answer_custom_questions(
 
     for f in fields:
         ans = by_id.get(f.field_id)
+
+        # Deterministic override for salary questions. The LLM keeps refusing
+        # these ("no data") even when the seed has an exact figure for the job
+        # country, so resolve them in code instead — same source of truth as
+        # tailor/answers.py and the filter's salary floor.
+        if _is_salary_question(f.question):
+            deterministic = _salary_answer_for(job, f.question, seed)
+            if deterministic is not None:
+                ans = FieldAnswer(
+                    field_id=f.field_id,
+                    answer=deterministic,
+                    unanswerable=False,
+                )
+                log.debug(
+                    "question_engine.salary_deterministic",
+                    question=f.question[:50],
+                    answer=deterministic,
+                )
+
         if ans is None or ans.unanswerable or not (ans.answer or "").strip():
             reason = (ans.reason if ans else "no answer returned") or "unanswered"
             log.info(
@@ -488,10 +636,41 @@ async def answer_custom_questions(
 async def _fill_field(scope, frame, field: _Field, answer: str) -> bool:  # type: ignore[no-untyped-def]
     try:
         if field.kind == "text":
-            el = scope.locator(f"[id='{field.field_id}']").first
-            await el.scroll_into_view_if_needed(timeout=3000)
-            await el.fill(answer, timeout=5000)
-            return bool((await el.input_value() or "").strip())
+            el = scope.locator(f"[id='{field.field_id}']")
+            if await el.count() == 0:
+                # Ashby renders custom text questions without an id; target the
+                # input/textarea inside the data-field-path wrapper.
+                el = scope.locator(
+                    f"[data-field-path='{field.field_id}'] input:not([type='hidden']), "
+                    f"[data-field-path='{field.field_id}'] textarea"
+                )
+            target = el.first
+            await target.scroll_into_view_if_needed(timeout=3000)
+
+            value = answer
+            # Numeric inputs reject "85000 EUR per year" outright — strip to the
+            # bare number the field expects (a digit-only input silently refuses
+            # the text and the field stays empty).
+            input_type = (await target.get_attribute("type") or "").lower()
+            if input_type in ("number", "tel"):
+                m = re.search(r"-?\d+(?:[.,]\d+)?", answer)
+                if m:
+                    value = m.group(0).replace(",", "")
+            # Playwright's fill() sets the value through the native setter but
+            # React-controlled inputs (Ashby is React) sometimes ignore it: the
+            # DOM shows the text, yet the component's state stays empty and the
+            # server rejects the field as missing. Type the value instead so
+            # every keystroke fires the real input/change handlers.
+            await target.click(timeout=3000)
+            await target.fill("", timeout=3000)
+            await target.type(value, delay=25, timeout=8000)
+
+            # Blur to commit React's onBlur validation.
+            try:
+                await target.press("Tab", timeout=2000)
+            except Exception:
+                pass
+            return bool((await target.input_value() or "").strip())
 
         if field.kind == "select":
             el = scope.locator(f"[id='{field.field_id}']").first
