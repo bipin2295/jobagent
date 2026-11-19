@@ -197,10 +197,17 @@ class AccountManager:
             # Fill sign-up form fields
             await _fill_signup_form(page, alias, password)
 
+            # Workday requires the terms-and-conditions checkbox. Without it the
+            # form silently refuses to submit ("Please check the box to
+            # continue"), no verification email is ever sent, and the caller
+            # waits out its whole timeout for mail that will never arrive.
+            await _check_consent_boxes(page)
+
             # Submit
             for sel in [
                 "button[type=submit]:text-matches('create|sign up|register', 'i')",
                 "[data-automation-id='createAccount']",
+                "button:text-matches('^Create Account$', 'i')",
                 "button[type=submit]",
             ]:
                 btn = page.locator(sel).first
@@ -210,6 +217,18 @@ class AccountManager:
 
             await page.wait_for_load_state("domcontentloaded", timeout=15000)
             await human_like_pause()
+
+            # If the form is still showing its own validation errors, the
+            # signup did not go through; report that instead of waiting for an
+            # email that will never come.
+            if await _signup_rejected(page):
+                log.warning(
+                    "account_manager.signup_rejected",
+                    ats=ats,
+                    tenant=tenant,
+                    reason=(await _signup_error_text(page))[:160],
+                )
+                return None
 
             # Persist the account record
             account = Account(
@@ -302,10 +321,20 @@ class AccountManager:
         """Wait for a verification email and click the link or enter the OTP."""
         log.info("account_manager.waiting_for_verification", alias=alias)
 
+        # Bounded: a missing verification email must not consume the whole
+        # apply budget (this previously blocked for 10 minutes and made runs
+        # look hung). Overridable for slow mail delivery.
+        try:
+            import os  # noqa: PLC0415
+
+            wait_s = int(os.environ.get("JOBAGENT_VERIFY_EMAIL_TIMEOUT", "180"))
+        except Exception:
+            wait_s = 180
+
         result = await self._email_provider.wait_for_verification_email(
             alias=alias,
             since=datetime.now(timezone.utc),
-            timeout_seconds=600,
+            timeout_seconds=wait_s,
         )
 
         if not result.found:
@@ -354,6 +383,72 @@ class AccountManager:
 
 
 # ── Sign-up form filler ───────────────────────────────────────────────────────
+
+async def _check_consent_boxes(page: "Page") -> None:
+    """Tick required consent / terms checkboxes on a sign-up form.
+
+    Workday blocks submission with "Please check the box to continue" until the
+    terms checkbox is ticked, and shows no indication until you click Create
+    Account. Only checkbox inputs that are required OR whose label reads like
+    consent are touched — marketing opt-ins are left alone.
+    """
+    import re  # noqa: PLC0415
+
+    consent_re = re.compile(
+        r"terms|conditions|consent|privacy|agree|acknowledge|read and|policy",
+        re.IGNORECASE,
+    )
+    boxes = page.locator("input[type=checkbox]")
+    for i in range(await boxes.count()):
+        box = boxes.nth(i)
+        try:
+            if await box.is_checked() or not await box.is_visible():
+                continue
+            required = await box.evaluate("e => !!e.required")
+            label = ""
+            try:
+                label = await box.evaluate(
+                    "e => (e.labels && e.labels[0] ? e.labels[0].innerText : "
+                    "(e.closest('label')?.innerText || e.parentElement?.innerText || ''))"
+                )
+            except Exception:
+                label = ""
+            if required or consent_re.search(label or ""):
+                await box.check(timeout=5000)
+                log.debug("account_manager.consent_checked", label=(label or "")[:60])
+        except Exception:
+            continue
+
+
+async def _signup_error_text(page: "Page") -> str:
+    """Return visible sign-up validation text, if any."""
+    for sel in ("[role='alert']", ".error", "[class*='error']", "[class*='Error']"):
+        loc = page.locator(sel)
+        for i in range(min(await loc.count(), 4)):
+            try:
+                text = (await loc.nth(i).inner_text()).strip()
+                if text:
+                    return text
+            except Exception:
+                continue
+    return ""
+
+
+async def _signup_rejected(page: "Page") -> bool:
+    """True when the sign-up form is still displayed with a validation error.
+
+    A successful submit navigates away from the create-account form, so a
+    still-present form plus an error message means nothing was created.
+    """
+    try:
+        text = await _signup_error_text(page)
+        if not text:
+            return False
+        still_form = await page.locator("input[type=password]").count() > 0
+        return still_form
+    except Exception:
+        return False
+
 
 async def _fill_signup_form(page: "Page", email: str, password: str) -> None:
     """Fill common sign-up form fields (email, password, confirm password)."""

@@ -80,14 +80,18 @@ _PAGE_INDICATORS: dict[str, list[str]] = {
         "button:text-matches('^Apply Manually$', 'i')",
         "[data-automation-id='autofillWithResume']",
     ],
+    # The Create Account page ALSO contains password inputs, so it must be
+    # checked BEFORE the login rule; otherwise "login" claims every account
+    # step and this branch is unreachable.
+    "create_account": [
+        "h2:text-matches('create account', 'i')",
+        "[data-automation-id='verifyPassword']",
+        "[data-automation-id='createAccount']",
+        "input[type=password][name*='verify' i]",
+    ],
     "login": [
         "[data-automation-id='signIn']",
         "[data-automation-id='username']",
-        "input[type=password]",
-    ],
-    "create_account": [
-        "[data-automation-id='createAccount']",
-        "[data-automation-id='verifyPassword']",
     ],
 }
 
@@ -144,21 +148,13 @@ class WorkdayHandler(ApplyHandlerBase):
                 result = extract_ats_slug(apply_url)
                 tenant = result[1] if result else "unknown"
 
-                # Workday login URL is usually the base of the apply URL
-                from urllib.parse import urlparse  # noqa: PLC0415
-                parsed = urlparse(apply_url)
-                login_url = f"{parsed.scheme}://{parsed.netloc}/login"
-
                 mgr = AccountManager()
-                logged_in = await mgr.ensure_logged_in(
-                    page, "workday", tenant, login_url,
-                    shadow_mode=shadow_mode,
-                )
-                if not logged_in and not shadow_mode:
-                    log.warning("workday.login_failed", job_id=job.id, tenant=tenant)
-                    # Proceed anyway — some Workday jobs allow guest application
 
                 # ── Step 2: Navigate to job ───────────────────────────────────
+                # NOTE: account creation must happen *after* clicking Apply on a
+                # posting. A constructed "{host}/login" URL is invalid on most
+                # Workday tenants ("Page not found"), so ensure_logged_in is
+                # called later, once the Create Account step is actually shown.
                 log.info("workday.navigate", job_id=job.id, url=apply_url)
                 await page.goto(apply_url, wait_until="domcontentloaded", timeout=30000)
                 await human_like_pause()
@@ -261,6 +257,53 @@ class WorkdayHandler(ApplyHandlerBase):
                     if page_type == "login":
                         # Re-try login (may have been logged out)
                         await _fill_login_form(page, answers)
+                        await human_like_pause()
+                        continue
+
+                    if page_type == "create_account":
+                        # Workday's "Create Account/Sign In" wizard step. The
+                        # account is created here and then verified by email.
+                        created = False
+                        try:
+                            created = await mgr.ensure_logged_in(
+                                page,
+                                "workday",
+                                tenant,
+                                page.url,
+                                shadow_mode=shadow_mode,
+                            )
+                            log.info(
+                                "workday.account_step",
+                                created=created,
+                                tenant=tenant,
+                                job_id=job.id,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning(
+                                "workday.account_error",
+                                error=str(exc)[:120],
+                                job_id=job.id,
+                            )
+                        await page.screenshot(
+                            path=str(shot_dir / "step_create_account.png")
+                        )
+                        # If the account could not be created/verified, stop.
+                        # Retrying would submit the sign-up form repeatedly,
+                        # creating duplicate accounts (or repeated failures)
+                        # and burning the whole run budget on email polling.
+                        if not created:
+                            return ApplyResult(
+                                success=False,
+                                application_id=app.id,
+                                status="blocked",
+                                error=(
+                                    "Could not create/sign in to a Workday account "
+                                    "for this tenant. The sign-up form may have been "
+                                    "rejected, or the verification email did not "
+                                    "arrive. Review step_create_account.png."
+                                ),
+                                screenshot_before=shot_dir / "step_create_account.png",
+                            )
                         await human_like_pause()
                         continue
 
