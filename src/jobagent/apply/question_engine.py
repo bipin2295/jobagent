@@ -352,6 +352,72 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
             question = re.sub(r"\s+", " ", (question or "").strip())
             if not question:
                 continue
+
+            # Consent/opt-in checkboxes are commonly rendered as a single
+            # same-named radio (smsConsent, whatsAppConsent, …). They are NOT
+            # a yes/no choice and must not be answered with a text value —
+            # that produced "fill_failed" on a phone-number question.
+            # Detection is by the radio's NAME, because the visible label often
+            # says something else entirely (e.g. "What is your phone number").
+            if len(members) == 1:
+                try:
+                    rtype = (await members[0].get_attribute("type") or "").lower()
+                except Exception:
+                    rtype = ""
+                if rtype == "checkbox" or re.search(
+                    r"consent|opt.?in|agree|terms|privacy|sms|whatsapp|marketing",
+                    name,
+                    re.IGNORECASE,
+                ):
+                    try:
+                        if not await members[0].is_checked():
+                            await members[0].check(timeout=4000)
+                            log.debug(
+                                "question_engine.consent_radio_checked", name=name[:40]
+                            )
+                    except Exception:
+                        pass
+                    continue
+
+            # Consent questions rendered as a Yes/No pair (Ashby smsConsent /
+            # whatsAppConsent). The visible label is unreliable here (it reads
+            # "What is your phone number"), so resolve by NAME and always opt
+            # in — the candidate consented to contact in the answer bank.
+            if re.search(
+                r"^(sms|whatsapp|email|marketing|privacy|terms).*consent$|"
+                r"consent.*(sms|whatsapp|marketing)$",
+                name,
+                re.IGNORECASE,
+            ):
+                chosen = False
+                for m in members:
+                    try:
+                        mid = await m.get_attribute("id") or ""
+                        label = ""
+                        if mid:
+                            lb = scope.locator(f"label[for='{mid}']")
+                            if await lb.count() > 0:
+                                label = (await lb.first.inner_text()).strip().lower()
+                        if not label:
+                            label = (
+                                await m.evaluate(
+                                    "e => (e.closest('label')?.innerText || "
+                                    "e.parentElement?.innerText || '')"
+                                )
+                            ).strip().lower()
+                        if label.startswith("yes") or "yes" == label[:3]:
+                            await m.check(timeout=4000)
+                            chosen = True
+                            break
+                    except Exception:
+                        continue
+                if not chosen and members:
+                    try:
+                        await members[0].check(timeout=4000)
+                    except Exception:
+                        pass
+                log.debug("question_engine.consent_pair_answered", name=name[:40])
+                continue
             options: list[str] = []
             for m in members:
                 try:
@@ -428,6 +494,33 @@ _EUROPE = frozenset(
 )
 
 
+_ESSAY_RE = re.compile(
+    r"\b(describe|what is the biggest|what's the biggest|what was the biggest|"
+    r"most complex|what makes you excited|why (do you want|this role|us)|"
+    r"what would you look at|tell us about|explain how|your experience with|"
+    r"how would you|what interests you|motivat)",
+    re.IGNORECASE,
+)
+
+
+def _shorten_essay(question: str, answer: str) -> str:
+    """Trim open-ended answers to one or two short sentences.
+
+    The prompt asks for 1-2 lines, but models routinely overrun on textareas.
+    Hard-limit here so a form never receives a wall of text: keep the first two
+    sentences, capped at ~320 characters.
+    """
+    if not _ESSAY_RE.search(question or ""):
+        return answer
+
+    text = " ".join(answer.split())
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    short = " ".join(sentences[:2]).strip()
+    if len(short) > 320:
+        short = short[:317].rsplit(" ", 1)[0] + "..."
+    return short or answer
+
+
 def _is_salary_question(question: str) -> bool:
     return bool(_SALARY_RE.search(question or ""))
 
@@ -496,6 +589,11 @@ def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # 
             "title": e.title,
             "start": str(getattr(e, "start", "") or ""),
             "end": str(getattr(e, "end", "") or ""),
+            "achievements": [
+                (b.short or b.resume or "").strip()[:280]
+                for b in e.bullets
+                if (b.short or b.resume)
+            ],
         }
         for e in profile.experience
     ]
@@ -586,6 +684,11 @@ def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # 
             "For 'your location' / residence questions answer '<city>, <country>' from answer_bank.basics.location (e.g. 'Pune, India').",
             "For 'what is the second line of your address' answer with the city and postcode from answer_bank.basics.location.",
             "For 'largest/most complex cloud dataset you have worked with' use answer_bank.screening.current_cloud_dataset.",
+            "For phone number questions answer candidate.phone exactly as given.",
+            "For 'what makes you excited about joining us' / 'why this company' "
+            "write ONE OR TWO sentences connecting the candidate's strongest "
+            "relevant achievement to the job title and company. Ground it in "
+            "candidate.experience achievements; never invent company specifics.",
             "For 'how did you hear' answer LinkedIn.",
             "answer_bank.screening holds the candidate's standing answers to "
             "compliance/preference questions (government official, non-compete, "
@@ -595,6 +698,19 @@ def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # 
             "For the end date of the candidate's CURRENT role answer "
             "answer_bank.screening.current_role_end ('Present'); if that is not "
             "a valid option, leave it unanswerable.",
+            "OPEN-ENDED / ESSAY QUESTIONS are ANSWERABLE. These include 'what is "
+            "the biggest/most complex X you have done', 'what makes you excited "
+            "about joining us', 'why this role', 'what would you look at first', "
+            "'describe your experience with X'. Write them from "
+            "candidate.experience[].achievements — quote concrete work the "
+            "candidate actually did (systems, technologies, team scope, measured "
+            "outcomes) and connect it to the job title/company. Keep the answer "
+            "to ONE OR TWO SHORT SENTENCES (max ~50 words). Do not use bullet "
+            "points, headings or preamble. Do not invent employers, metrics or "
+            "technologies that are absent from the achievements.",
+            "For 'describe your experience with X' where X appears in "
+            "candidate.skills_years, answer with the years plus the most relevant "
+            "achievement that used X.",
             "Never invent facts. If the answer is not supported by the data above, "
             "mark it unanswerable.",
             "When options are provided, the answer MUST be one of those options verbatim.",
@@ -695,7 +811,8 @@ async def answer_custom_questions(
             unresolved.append(f.question)
             continue
 
-        ok = await _fill_field(scope, frame, f, ans.answer.strip())
+        answer_text = _shorten_essay(f.question, ans.answer.strip())
+        ok = await _fill_field(scope, frame, f, answer_text)
         if ok:
             log.debug(
                 "question_engine.filled",
@@ -739,16 +856,30 @@ async def _fill_field(scope, frame, field: _Field, answer: str) -> bool:  # type
                 m = re.search(r"-?\d+(?:[.,]\d+)?", answer)
                 if m:
                     value = m.group(0).replace(",", "")
-            # Playwright's fill() sets the value through the native setter but
-            # React-controlled inputs (Ashby is React) sometimes ignore it: the
-            # DOM shows the text, yet the component's state stays empty and the
-            # server rejects the field as missing. Type the value instead so
-            # every keystroke fires the real input/change handlers.
-            await target.click(timeout=3000)
-            await target.fill("", timeout=3000)
-            await target.type(value, delay=25, timeout=8000)
+            input_type = (await target.get_attribute("type") or "").lower()
+            tag = (await target.evaluate("e => e.tagName.toLowerCase()")) or ""
+            is_textarea = tag == "textarea"
+            if input_type in ("number", "tel"):
+                m = re.search(r"-?\d+(?:[.,]\d+)?", answer)
+                if m:
+                    value = m.group(0).replace(",", "")
 
-            # Blur to commit React's onBlur validation.
+            await target.scroll_into_view_if_needed(timeout=3000)
+
+            if is_textarea:
+                # Textareas accept fill() directly and it is instant; typing
+                # character-by-character over a long essay exceeds the timeout.
+                await target.fill(value, timeout=8000)
+            else:
+                # Playwright's fill() sets the value through the native setter
+                # but React-controlled inputs (Ashby is React) sometimes ignore
+                # it: the DOM shows the text, yet component state stays empty
+                # and the server rejects the field. Type instead so every
+                # keystroke fires the real input/change handlers.
+                await target.click(timeout=3000)
+                await target.fill("", timeout=3000)
+                await target.type(value, delay=25, timeout=15000)
+
             try:
                 await target.press("Tab", timeout=2000)
             except Exception:

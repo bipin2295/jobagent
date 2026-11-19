@@ -180,7 +180,9 @@ class EmailProvider:
         query = (
             'newer_than:2d (subject:"Thank you for applying" OR '
             'subject:"application received" OR subject:"application submitted" OR '
-            'subject:"Thanks for applying" OR subject:"we received your application")'
+            'subject:"Thanks for applying" OR subject:"Thanks for your application" OR '
+            'subject:"we received your application" OR '
+            'subject:"your application" OR subject:"application")'
         )
         deadline = asyncio.get_event_loop().time() + timeout_seconds
         while asyncio.get_event_loop().time() < deadline:
