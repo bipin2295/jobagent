@@ -33,6 +33,7 @@ from jobagent.apply.form_utils import (
     form_country_mismatch as _form_country_mismatch,
     handle_security_code as _handle_security_code,
     submitted_at_now,
+    resume_attached as _resume_attached,
     upload_resume as _upload_resume,
     validation_errors as _validation_errors,
 )
@@ -1147,7 +1148,13 @@ class GreenhouseHandler(ApplyHandlerBase):
                 # Resume is mandatory on Greenhouse forms; upload through the
                 # tenant's widget and verify it actually attached.
                 if resume_path is not None:
-                    if not await _upload_resume(page, fill_scope, resume_path):
+                    # fill_all_common_fields already attempted the upload; only
+                    # re-upload if nothing is attached, otherwise a second
+                    # set_input_files on some tenants CLEARS the first one.
+                    already = await _resume_attached(fill_scope, Path(resume_path).name)
+                    if not already and not await _upload_resume(
+                        page, fill_scope, resume_path
+                    ):
                         await page.screenshot(
                             path=str(shot_dir / "step_resume_failed.png")
                         )

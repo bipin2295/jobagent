@@ -79,18 +79,63 @@ async def dismiss_consent(page: Any) -> bool:  # noqa: ANN401
 
 
 async def resume_attached(scope: Any, filename: str) -> bool:  # noqa: ANN401
-    """True when a file input holds a file or the filename is shown on the form."""
+    """True when a resume is attached to the form.
+
+    Checks three independent signals, because tenants differ:
+      1. a file input still holds a file (React often replaces the input node
+         after upload, so this can legitimately return 0),
+      2. the uploaded filename appears anywhere in the form,
+      3. a "remove / delete attachment" control exists next to the filename.
+
+    Note: when a tenant swaps the <input> for a "resume.pdf ✕" chip, the stale
+    locator throws instead of returning 0 — that must not be read as failure.
+    """
+    try:
+        inner = (await scope.inner_text()).lower()
+    except Exception:
+        inner = ""
+
+    stem = filename.rsplit(".", 1)[0].lower()
+    if filename.lower() in inner or (stem and stem in inner):
+        return True
+
     inputs = scope.locator("input[type=file]")
     for i in range(await inputs.count()):
         try:
             if await inputs.nth(i).evaluate("e => (e.files ? e.files.length : 0)"):
                 return True
         except Exception:
+            # Input was replaced after upload — treat as "probably attached"
+            # and let the text/UI check above be the decider.
             continue
-    try:
-        return filename.lower() in (await scope.inner_text()).lower()
-    except Exception:
-        return False
+
+    # An "X / remove" affordance only appears once something is attached.
+    for sel in (
+        "button[aria-label*='remove' i]",
+        "button[aria-label*='delete' i]",
+        "[data-testid*='remove-file' i]",
+        "svg[aria-label*='remove' i]",
+    ):
+        try:
+            if await scope.locator(sel).count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _wait_attached(scope: Any, filename: str, attempts: int = 6) -> bool:  # noqa: ANN401
+    """Poll for the upload to register.
+
+    React uploaders render the filename chip only after the file is processed,
+    which can take several seconds on a cold start. A single 1.5s check
+    produced false "upload failed" results on slower tenants.
+    """
+    for n in range(attempts):
+        if await resume_attached(scope, filename):
+            return True
+        await asyncio.sleep(1.2 * (n + 1))
+    return False
 
 
 async def upload_resume(page: Any, scope: Any, path: str | Path) -> bool:  # noqa: ANN401
@@ -114,8 +159,7 @@ async def upload_resume(page: Any, scope: Any, path: str | Path) -> bool:  # noq
             await loc.first.set_input_files(str(p), timeout=8000)
         except Exception:
             pass
-        await asyncio.sleep(1.5)
-        if await resume_attached(scope, p.name):
+        if await _wait_attached(scope, p.name):
             log.info("form_utils.resume_uploaded", method="direct", path=str(p))
             return True
 
@@ -130,8 +174,7 @@ async def upload_resume(page: Any, scope: Any, path: str | Path) -> bool:  # noq
             await chooser.set_files(str(p))
         except Exception:
             continue
-        await asyncio.sleep(2)
-        if await resume_attached(scope, p.name):
+        if await _wait_attached(scope, p.name):
             log.info(
                 "form_utils.resume_uploaded", method=f"chooser:{text}", path=str(p)
             )
@@ -141,10 +184,9 @@ async def upload_resume(page: Any, scope: Any, path: str | Path) -> bool:  # noq
     if await any_input.count() > 0:
         try:
             await any_input.first.set_input_files(str(p), timeout=8000)
-            await asyncio.sleep(1.5)
         except Exception:
             pass
-        if await resume_attached(scope, p.name):
+        if await _wait_attached(scope, p.name):
             log.info("form_utils.resume_uploaded", method="fallback", path=str(p))
             return True
 

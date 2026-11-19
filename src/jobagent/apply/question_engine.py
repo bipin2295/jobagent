@@ -267,12 +267,26 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
             continue
 
     # ── React-select comboboxes ──────────────────────────────────────────────
-    combo_loc = scope.locator("[role=combobox][aria-required='true']")
+    combo_loc = scope.locator(
+        "[role=combobox][aria-required='true'], "
+        "[data-field-path] [role=combobox], "
+        "[data-field-entry-id] [role=combobox]"
+    )
     for i in range(await combo_loc.count()):
         el = combo_loc.nth(i)
         try:
             field_id = await el.get_attribute("id") or ""
-            if not field_id or field_id in _CORE_IDS or field_id.startswith("iti-"):
+            if field_id and (field_id in _CORE_IDS or field_id.startswith("iti-")):
+                continue
+            if not field_id:
+                field_id = (
+                    await el.evaluate(
+                        "e => { const w = e.closest('[data-field-path]'); "
+                        "return w ? w.getAttribute('data-field-path') : ''; }"
+                    )
+                    or ""
+                )
+            if not field_id:
                 continue
             if not await el.is_visible() or await el.is_disabled():
                 continue
@@ -295,6 +309,71 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
                     question=question,
                     kind="combobox",
                     options=options,
+                )
+            )
+        except Exception:
+            continue
+
+    # ── Radio groups ─────────────────────────────────────────────────────────
+    # Ashby renders "willing to relocate?" style questions as a radio group
+    # (yes / no / already there). The engine ignored them, leaving a required
+    # question blank while every text field looked correct.
+    radios = scope.locator("input[type=radio]")
+    groups: dict[str, list] = {}
+    for i in range(await radios.count()):
+        r = radios.nth(i)
+        try:
+            if not await r.is_visible():
+                continue
+            name = await r.get_attribute("name") or ""
+            if not name:
+                continue
+            groups.setdefault(name, []).append(r)
+        except Exception:
+            continue
+
+    for name, members in groups.items():
+        try:
+            checked = any([await m.is_checked() for m in members])
+            if checked:
+                continue
+            label_el = scope.locator(f"input[type=radio][name='{name}']").first
+            question = ""
+            try:
+                question = await label_el.evaluate(
+                    "e => { const fs = e.closest('fieldset'); if (fs) { "
+                    "const lg = fs.querySelector('legend'); if (lg) return lg.innerText; } "
+                    "const w = e.closest('[data-field-path]'); "
+                    "if (w) { const l = w.querySelector('label'); if (l) return l.innerText; } "
+                    "return ''; }"
+                )
+            except Exception:
+                question = ""
+            question = re.sub(r"\s+", " ", (question or "").strip())
+            if not question:
+                continue
+            options: list[str] = []
+            for m in members:
+                try:
+                    mid = await m.get_attribute("id") or ""
+                    txt = ""
+                    if mid:
+                        lb = scope.locator(f"label[for='{mid}']")
+                        if await lb.count() > 0:
+                            txt = (await lb.first.inner_text()).strip()
+                    options.append(txt)
+                except Exception:
+                    options.append("")
+            field_id = f"radio:{name}"
+            if field_id in seen_text:
+                continue
+            seen_text.add(field_id)
+            fields.append(
+                _Field(
+                    field_id=field_id,
+                    question=question,
+                    kind="radio",
+                    options=[o for o in options if o],
                 )
             )
         except Exception:
@@ -503,6 +582,10 @@ def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # 
             "For consent to interview recording / AI note-takers / interview "
             "integrity tools use "
             "answer_bank.screening.consent_interview_recording (true = Yes).",
+            "For pronouns use answer_bank.screening.pronouns.",
+            "For 'your location' / residence questions answer '<city>, <country>' from answer_bank.basics.location (e.g. 'Pune, India').",
+            "For 'what is the second line of your address' answer with the city and postcode from answer_bank.basics.location.",
+            "For 'largest/most complex cloud dataset you have worked with' use answer_bank.screening.current_cloud_dataset.",
             "For 'how did you hear' answer LinkedIn.",
             "answer_bank.screening holds the candidate's standing answers to "
             "compliance/preference questions (government official, non-compete, "
@@ -681,6 +764,29 @@ async def _fill_field(scope, frame, field: _Field, answer: str) -> bool:  # type
             await el.select_option(label=match)
             return True
 
+        if field.kind == "radio":
+            # field_id is "radio:<name>"; pick the option whose label matches.
+            name = field.field_id.split(":", 1)[1]
+            members = scope.locator(f"input[type=radio][name='{name}']")
+            target_text = answer.strip().lower()
+            for i in range(await members.count()):
+                m = members.nth(i)
+                try:
+                    mid = await m.get_attribute("id") or ""
+                    label = ""
+                    if mid:
+                        lb = scope.locator(f"label[for='{mid}']")
+                        if await lb.count() > 0:
+                            label = (await lb.first.inner_text()).strip().lower()
+                    if not label:
+                        continue
+                    if label == target_text or target_text in label or label in target_text:
+                        await m.check(timeout=5000)
+                        return await m.is_checked()
+                except Exception:
+                    continue
+            return False
+
         if field.kind == "yesno":
             group = scope.locator(f"[data-field-path='{field.field_id}']").first
             want = answer.strip().lower()
@@ -717,9 +823,19 @@ def _best_option(answer: str, options: list[str]) -> str | None:
 
 
 async def _fill_combobox(scope, frame, field_id: str, answer: str) -> bool:  # type: ignore[no-untyped-def]
-    inp = scope.locator(f"[id='{field_id}']").first
-    ctrl = inp.locator("xpath=ancestor::*[contains(@class,'select__control')]").first
-    target = ctrl if (await ctrl.count() > 0 and await ctrl.is_visible()) else inp
+    # field_id may be an element id OR a data-field-path value (Ashby system
+    # fields such as the residence combobox have no id at all).
+    inp = scope.locator(f"[id='{field_id}']")
+    if await inp.count() == 0:
+        inp = scope.locator(
+            f"[data-field-path='{field_id}'] [role=combobox], "
+            f"[data-field-path='{field_id}'] input:not([type='hidden'])"
+        )
+    if await inp.count() == 0:
+        return False
+    anchor = inp.first
+    ctrl = anchor.locator("xpath=ancestor::*[contains(@class,'select__control')]").first
+    target = ctrl if (await ctrl.count() > 0 and await ctrl.is_visible()) else anchor
     await _click_robust(target)
     await asyncio.sleep(0.6)
 
