@@ -952,7 +952,15 @@ async def _fill_field(scope, frame, field: _Field, answer: str) -> bool:  # type
             await asyncio.sleep(0.4)
             return await group.locator("button[aria-pressed='true']").count() > 0
 
-        # combobox (React-select)
+        # combobox: try typing first for free-text typeaheads (Ashby salary /
+        # location keep the typed value and have no option list). If that does
+        # not commit, fall back to option selection. Order matters: opening the
+        # React-select menu first leaves the input empty, so a later type into
+        # the same field fails.
+        if await _type_into_combobox(
+            scope, field.field_id, answer, question=field.question
+        ):
+            return True
         return await _fill_combobox(scope, frame, field.field_id, answer)
     except Exception as exc:
         log.debug("question_engine.fill_error", field_id=field.field_id, error=str(exc)[:80])
@@ -971,6 +979,92 @@ def _best_option(answer: str, options: list[str]) -> str | None:
         if opt.strip().lower() and opt.strip().lower() in ans:
             return opt
     return None
+
+
+async def _type_into_combobox(
+    scope, field_id: str, answer: str, question: str = "",
+) -> bool:  # type: ignore[no-untyped-def]
+    """Type into a free-text combobox (no option list to pick from).
+
+    Ashby renders several custom questions as role=combobox inputs with no
+    options (Location, Yearly Salary Expectations). Selecting an option is
+    impossible, so the value must be typed and committed with Tab/Enter.
+    """
+    el = scope.locator(f"[id='{field_id}']")
+    if await el.count() == 0:
+        el = scope.locator(
+            f"[data-field-path='{field_id}'] input, "
+            f"[data-field-path='{field_id}'] textarea"
+        )
+    if await el.count() == 0:
+        return False
+    target = el.first
+
+    value = answer
+    # Numeric salary/amount comboboxes reject "85000 EUR per year". The check
+    # must look at the FIELD ID/question text, not the answer itself (the
+    # answer is already formatted and contains no trigger word).
+    if re.search(r"salary|amount|number|expect", f"{field_id} {question}", re.I):
+        m = re.search(r"-?\d+(?:[.,]\d+)?", answer)
+        if m:
+            value = m.group(0).replace(",", "")
+
+    try:
+        await target.scroll_into_view_if_needed(timeout=3000)
+        await target.click(timeout=3000)
+        try:
+            await target.fill("", timeout=3000)
+        except Exception:
+            pass
+        await target.type(value, delay=40, timeout=15000)
+        await asyncio.sleep(1.2)
+
+        # Commit the value. Free-text comboboxes (Ashby salary/location) keep
+        # the typed text without a matching option, so Tab is what actually
+        # commits it — but Ashby's React state resets the input on blur unless
+        # a real input+change event fired, which Playwright's type() alone does
+        # not guarantee. Dispatch those events explicitly before blurring.
+        current = (await target.input_value() or "").strip()
+        if current:
+            try:
+                await target.evaluate(
+                    """(e, v) => {
+                        const setter = Object.getOwnPropertyDescriptor(
+                            HTMLInputElement.prototype, 'value').set;
+                        setter.call(e, v);
+                        e.dispatchEvent(new Event('input', { bubbles: true }));
+                        e.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""",
+                    value,
+                )
+            except Exception:
+                pass
+
+        opts = scope.locator("[role=option]")
+        if await opts.count() > 0 and current:
+            try:
+                await opts.first.click(timeout=3000)
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
+        try:
+            await target.press("Tab", timeout=2000)
+        except Exception:
+            pass
+
+        # Verify AFTER the blur — Ashby clears the field on blur when the value
+        # never reached component state.
+        final = (await target.input_value() or "").strip()
+        if not final:
+            log.debug(
+                "question_engine.combobox_value_cleared",
+                field_id=field_id[:20],
+                question=question[:40],
+            )
+        return bool(final)
+    except Exception as exc:
+        log.debug("question_engine.combobox_type_error", field_id=field_id[:20], error=str(exc)[:60])
+        return False
 
 
 async def _fill_combobox(scope, frame, field_id: str, answer: str) -> bool:  # type: ignore[no-untyped-def]
