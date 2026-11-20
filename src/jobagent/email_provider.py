@@ -73,6 +73,10 @@ class EmailProvider:
 
     def __init__(self) -> None:
         self._service: Any = None
+        #: True when credentials exist but Google rejected them (revoked or
+        #: expired refresh token). Callers/preflight use this to tell the
+        #: operator to reconnect, rather than silently proceeding without mail.
+        self.revoked: bool = False
         if not _HAS_GOOGLE_LIBS:
             log.debug("email_provider.no_google_libs")
             return
@@ -88,7 +92,18 @@ class EmailProvider:
             self._service = build("gmail", "v1", credentials=creds, cache_discovery=False)
             log.debug("email_provider.connected")
         except Exception as exc:
-            log.warning("email_provider.init_error", error=str(exc)[:80])
+            # Distinguish "revoked/invalid credentials" from a transient error:
+            # invalid_grant means the refresh token is dead and the operator
+            # must re-run the OAuth flow.
+            msg = str(exc)
+            if "invalid_grant" in msg or "revoked" in msg.lower():
+                self.revoked = True
+                log.error(
+                    "email_provider.token_revoked",
+                    hint="run `python scripts/gmail_connect.py` on the host",
+                )
+            else:
+                log.warning("email_provider.init_error", error=msg[:80])
 
     @property
     def connected(self) -> bool:

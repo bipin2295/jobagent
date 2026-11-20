@@ -148,11 +148,23 @@ async def _preflight() -> tuple[int, int]:
     except Exception:  # noqa: BLE001
         checks.append(("Ollama (embeddings)", False, "not reachable – start Ollama first"))
 
-    # 4. Gmail token
+    # 4. Gmail token — verify it actually works, not just that the file exists.
+    # A revoked refresh token looks perfectly healthy on disk, which is how
+    # runs lost confirmation-email checks while preflight reported success.
     try:
-        from jobagent.config import settings
-        if settings.gmail_ready:
-            checks.append(("Gmail token", True, "present"))
+        from jobagent.email_provider import EmailProvider  # noqa: PLC0415
+
+        provider = EmailProvider()
+        if provider.connected:
+            checks.append(("Gmail token", True, "connected"))
+        elif provider.revoked:
+            checks.append(
+                (
+                    "Gmail token",
+                    False,
+                    "REVOKED/expired — run `python scripts/gmail_connect.py` on the host",
+                )
+            )
         else:
             checks.append(("Gmail token", False, "run `jobagent gmail-connect`"))
     except Exception as exc:  # noqa: BLE001
