@@ -220,6 +220,39 @@ class LeverHandler(ApplyHandlerBase):
                 await fill_all_common_fields(page, field_values, resume_path)
                 await human_like_pause()
 
+                # ── Step 4b: Location typeahead ──────────────────────────────
+                # Lever's location field is an autocomplete that .fill() leaves
+                # uncommitted; the required field then fails validation.
+                city_text = field_values.get("city") or ""
+                if city_text:
+                    loc_input = page.locator(
+                        "input[id*='location' i][role='combobox'], "
+                        "input[id*='location' i], "
+                        "input[placeholder*='location' i]"
+                    )
+                    if await loc_input.count() > 0:
+                        target = loc_input.first
+                        try:
+                            await target.click(timeout=5000)
+                            await target.fill("", timeout=3000)
+                            await target.type(city_text, delay=90)
+                            await asyncio.sleep(2.5)
+                            opts = page.locator("[role=option]")
+                            picked = False
+                            for i in range(await opts.count()):
+                                txt = (await opts.nth(i).inner_text()).strip()
+                                if not txt or await opts.nth(i).get_attribute("data-dial-code"):
+                                    continue
+                                if city_text.split(",")[0].lower() in txt.lower():
+                                    await opts.nth(i).click()
+                                    picked = True
+                                    break
+                            if not picked:
+                                await target.press("Tab")
+                            log.debug("lever.location_set", city=city_text, picked=picked)
+                        except Exception as exc:
+                            log.debug("lever.location_error", error=str(exc)[:80])
+
                 # ── Step 5: Cover letter / additional information ─────────────
                 cl_path = package_dir / "cover_letter.txt"
                 if cl_path.exists():

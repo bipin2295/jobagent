@@ -33,7 +33,20 @@ log = structlog.get_logger(__name__)
 
 # Fields handled by the core field mapper / location autocomplete, never by us.
 _CORE_IDS = frozenset(
-    {"first_name", "last_name", "email", "phone", "candidate-location", "resume"}
+    {
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "candidate-location",
+        "resume",
+        # Lever/Microsoft-style location typeaheads. Handled by the handler's
+        # own location logic; leaving them to the answer engine produced an
+        # empty `location-input` that the verifier correctly rejected.
+        "location-input",
+        "location",
+        "candidate-location-input",
+    }
 )
 
 _SKIP_INPUT_TYPES = frozenset(
@@ -689,6 +702,13 @@ def _candidate_context(profile: MasterProfile, seed: dict, job: Any) -> str:  # 
             "write ONE OR TWO sentences connecting the candidate's strongest "
             "relevant achievement to the job title and company. Ground it in "
             "candidate.experience achievements; never invent company specifics.",
+            "For 'are you looking for a permanent job (CDI)' use "
+            "answer_bank.screening.looking_for_permanent (true = Yes).",
+            "For a website / GitHub / portfolio question use "
+            "answer_bank.screening.website when non-empty, otherwise the "
+            "candidate's LinkedIn URL.",
+            "For 'if you selected Other, please specify' answer "
+            "answer_bank.screening.other_specify ('Not applicable').",
             "For 'how did you hear' answer LinkedIn.",
             "answer_bank.screening holds the candidate's standing answers to "
             "compliance/preference questions (government official, non-compete, "
