@@ -137,6 +137,28 @@ async def _handle_checkboxes(page) -> None:  # type: ignore[type-arg]
 # ---------------------------------------------------------------------------
 
 
+def _company(job: Job) -> str:
+    """Best-effort company name for confirmation-email matching."""
+    if job.company_id:
+        try:
+            from jobagent.db.engine import get_session  # noqa: PLC0415
+            from jobagent.db.models import Company  # noqa: PLC0415
+
+            with get_session() as session:
+                company = session.get(Company, job.company_id)
+            if company and company.name:
+                return company.name
+        except Exception:
+            pass
+    try:
+        from urllib.parse import urlparse  # noqa: PLC0415
+
+        host = urlparse(job.apply_url or job.url).netloc
+        return host.removeprefix("www.").removeprefix("jobs.") or ""
+    except Exception:
+        return ""
+
+
 class LeverHandler(ApplyHandlerBase):
     """Apply handler for Lever-hosted job postings."""
 
@@ -412,7 +434,7 @@ class LeverHandler(ApplyHandlerBase):
                 # Cross-check Gmail: Lever always emails a receipt, even when
                 # the confirmation UI is not recognised.
                 if not confirmed:
-                    confirmed = await confirm_via_email(None, submitted_at)
+                    confirmed = await confirm_via_email(_company(job), submitted_at)
 
                 if confirmed:
                     log.info("lever.submitted", job_id=job.id, url=page.url)

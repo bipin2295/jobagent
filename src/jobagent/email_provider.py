@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +61,7 @@ class EmailResult:
     subject: str = ""
     snippet: str = ""
     raw_body: str = ""
+    received_at: datetime | None = None   # when the mail arrived (UTC)
 
 
 class EmailProvider:
@@ -197,21 +198,52 @@ class EmailProvider:
             'subject:"application received" OR subject:"application submitted" OR '
             'subject:"Thanks for applying" OR subject:"Thanks for your application" OR '
             'subject:"we received your application" OR '
-            'subject:"your application" OR subject:"application")'
+            'subject:"your application" OR subject:"application" OR '
+            'subject:"application is in")'
         )
+
+        # Recency is the primary guard: an email from a DIFFERENT employer that
+        # happened to arrive in the same window must not count, so prefer
+        # company-name matches and only accept a name-less subject (e.g.
+        # "Your Application is In!") within a short window of the submit.
+        fresh_cutoff = since + timedelta(minutes=10)
+        company_l = (company or "").strip().lower()
+
         deadline = asyncio.get_event_loop().time() + timeout_seconds
         while asyncio.get_event_loop().time() < deadline:
             results = await asyncio.to_thread(self._list_emails, query, since, 10)
             for r in results:
                 hay = f"{r.subject} {r.snippet}".lower()
-                if company and company.lower() not in hay:
+                if company_l:
+                    if company_l in hay:
+                        log.info(
+                            "email_provider.confirmation_found",
+                            subject=r.subject[:70],
+                            company=company,
+                            match="company",
+                        )
+                        return True
+                    # Subject without the company name: accept only if it landed
+                    # within minutes of this submission (freshness proxy).
+                    if r.received_at and r.received_at <= fresh_cutoff:
+                        log.info(
+                            "email_provider.confirmation_found",
+                            subject=r.subject[:70],
+                            company=company,
+                            match="fresh",
+                        )
+                        return True
                     continue
-                log.info(
-                    "email_provider.confirmation_found",
-                    subject=r.subject[:70],
-                    company=company,
-                )
-                return True
+                # No company supplied — require freshness so we never claim an
+                # unrelated employer's receipt.
+                if r.received_at is None or r.received_at <= fresh_cutoff:
+                    log.info(
+                        "email_provider.confirmation_found",
+                        subject=r.subject[:70],
+                        company=None,
+                        match="fresh",
+                    )
+                    return True
             await asyncio.sleep(10)
         return False
 
@@ -273,6 +305,7 @@ class EmailProvider:
             subject=subject,
             snippet=snippet,
             raw_body=body[:2000],
+            received_at=received_at,
         )
 
 
