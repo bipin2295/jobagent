@@ -15,6 +15,7 @@ Lever apply flow:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import traceback
 from pathlib import Path
