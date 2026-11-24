@@ -49,6 +49,11 @@ COMMON_FIELD_PATTERNS: list[tuple[str, str] | tuple[str, str, bool]] = [
     ("Name", "full_name", True),
     ("Email", "email"),
     ("Email Address", "email"),
+    # join.com / Chakra UI use placeholders instead of labels.
+    ("Your email address", "email"),
+    ("Your first name", "first_name"),
+    ("Your last name", "last_name"),
+    ("Your phone number", "phone"),
     ("Phone", "phone"),
     ("Phone Number", "phone"),
     ("Mobile", "phone"),

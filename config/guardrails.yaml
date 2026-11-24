@@ -4,7 +4,7 @@
 # Only these ATS types are discovered, tailored, and applied to.
 # Comment out or set to [] to process all supported ATS types.
 # Current focus: Greenhouse only — solid, well-tested, confirmed working.
-active_ats: [greenhouse, ashby, lever]
+active_ats: [greenhouse, ashby, lever, joincom]
 
 daily_cap: 40
 

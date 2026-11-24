@@ -165,6 +165,11 @@ def _load_handlers() -> list[ApplyHandlerBase]:
         handlers.append(WorkdayHandler())
     except ImportError:
         pass
+    try:
+        from jobagent.apply.handlers.joincom import JoinComHandler
+        handlers.append(JoinComHandler())
+    except ImportError:
+        pass
     return handlers
 
 

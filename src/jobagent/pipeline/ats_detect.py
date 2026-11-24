@@ -90,6 +90,14 @@ ATS_PATTERNS: list[tuple[re.Pattern[str], str, int]] = [
         "workable",
         1,
     ),
+    # ── join.com ────────────────────────────────────────────────────────────
+    # https://join.com/companies/{companySlug}/{jobId}-{jobSlug}
+    # Apply form is at .../apply (verified; /application 404s).
+    (
+        re.compile(r"join\.com/companies/([^/?#]+)", re.I),
+        "joincom",
+        1,
+    ),
     # ── Recruitee ───────────────────────────────────────────────────────────
     # https://{slug}.recruitee.com/
     (
