@@ -59,6 +59,10 @@ services:
       JOBAGENT_OLLAMA_BASE_URL: http://ollama:11434
       # Resume is always at this path inside the container
       JOBAGENT_PROFILE_SOURCE: /resume/master_resume.txt
+      # Local timezone. Without this the container runs in UTC, so the
+      # active-hours window (08:00-22:00) would be evaluated against UTC
+      # rather than the operator's local time.
+      TZ: ${TZ:-Asia/Kolkata}
 
     # All other JOBAGENT_* vars (API keys, tokens) come from .env
     env_file:
