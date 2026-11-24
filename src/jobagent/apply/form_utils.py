@@ -399,6 +399,71 @@ _CONSENT_WORDS = (
 )
 
 
+async def is_present(el: Any) -> bool:  # noqa: ANN401
+    """Return True if *el* is attached and rendered, even if visually hidden.
+
+    LinkedIn (and some other obfuscated UIs) style checkboxes and radios by
+    hiding the native ``<input>`` (zero-size, ``display:none``-adjacent) and
+    drawing a fake control via CSS on a sibling/ancestor element. Playwright's
+    ``is_visible()`` reports these as invisible, so a gate like
+    ``if not await el.is_visible(): continue`` silently drops every single
+    one — which is exactly how a required LinkedIn Easy Apply question (a
+    Yes/No radio pair) stayed unanswered while the engine reported success.
+    This checks DOM presence instead: ``offsetParent`` or a non-empty
+    ``getClientRects()`` — both true for elements with zero visual size but
+    still participating in layout/events, false only for truly detached or
+    ``display:none`` elements.
+    """
+    try:
+        return bool(
+            await el.evaluate(
+                "e => e.offsetParent !== null || !!e.getClientRects().length"
+            )
+        )
+    except Exception:
+        return False
+
+
+async def click_hidden_checkable(el: Any, page: Any) -> bool:  # noqa: ANN401
+    """Check/select a checkbox or radio ``el``, including visually-hidden ones.
+
+    Playwright's ``check()``/``click()`` fail with "element is outside of
+    viewport" on LinkedIn's styled controls because the real input has a
+    zero-size bounding box and is never scrolled into view. A DOM-level
+    ``element.click()`` fires the React change handler directly and works
+    reliably; forced check and a mouse click at the (possibly zero-size)
+    bounding box are kept as fallbacks for other ATSs' quirks.
+
+    Returns the control's checked state after the attempt.
+    """
+    try:
+        await el.evaluate("e => e.click()")
+        await asyncio.sleep(0.4)
+        if await el.is_checked():
+            return True
+    except Exception:
+        pass
+    try:
+        await el.check(timeout=4000, force=True)
+        if await el.is_checked():
+            return True
+    except Exception:
+        pass
+    try:
+        bb = await el.bounding_box()
+        if bb:
+            await page.mouse.click(
+                bb["x"] + bb["width"] / 2,
+                bb["y"] + bb["height"] / 2,
+            )
+            await asyncio.sleep(0.4)
+            if await el.is_checked():
+                return True
+    except Exception:
+        pass
+    return await el.is_checked()
+
+
 async def check_consent_checkboxes(page: Any) -> int:  # noqa: ANN401
     """Tick required consent/privacy checkboxes and return how many were ticked.
 
@@ -423,13 +488,8 @@ async def check_consent_checkboxes(page: Any) -> int:  # noqa: ANN401
         try:
             if await box.is_checked():
                 continue
-            # NOTE: do NOT require the INPUT to be visible. Styled checkboxes
-            # (LinkedIn, Chakra, MUI) hide the real <input> and draw a fake box
-            # via CSS; the input is still the element that holds state and its
-            # label is what a human clicks. Requiring visibility skipped every
-            # consent box on LinkedIn and the form then refused to submit.
-            in_dom = await box.evaluate("e => e.offsetParent !== null || !!e.getClientRects().length")
-            if not in_dom:
+            # NOTE: do NOT require the INPUT to be visible — see is_present().
+            if not await is_present(box):
                 continue
             required = await box.evaluate("e => !!e.required")
             label = ""
@@ -466,36 +526,7 @@ async def check_consent_checkboxes(page: Any) -> int:  # noqa: ANN401
             if any(w in low for w in ("newsletter", "marketing", "offers", "promotions")):
                 continue
 
-            # Click strategy for styled/hidden checkboxes. Playwright's
-            # check() fails with "outside of the viewport" because LinkedIn's
-            # modal does not scroll the hidden input into view, and the input
-            # has a zero-size bounding box. A DOM-level click() fires the
-            # React handler directly and works reliably.
-            clicked = False
-            try:
-                await box.evaluate("e => e.click()")
-                await asyncio.sleep(0.4)
-                clicked = await box.is_checked()
-            except Exception:
-                clicked = False
-            if not clicked:
-                try:
-                    await box.check(timeout=4000, force=True)
-                    clicked = await box.is_checked()
-                except Exception:
-                    clicked = False
-            if not clicked:
-                try:
-                    bb = await box.bounding_box()
-                    if bb:
-                        await page.mouse.click(
-                            bb["x"] + bb["width"] / 2,
-                            bb["y"] + bb["height"] / 2,
-                        )
-                        await asyncio.sleep(0.4)
-                        clicked = await box.is_checked()
-                except Exception:
-                    clicked = False
+            clicked = await click_hidden_checkable(box, page)
 
             if clicked:
                 ticked += 1

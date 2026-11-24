@@ -25,6 +25,7 @@ from typing import Any
 import structlog
 from pydantic import BaseModel, Field
 
+from jobagent.apply.form_utils import click_hidden_checkable, is_present
 from jobagent.llm.structured import structured_complete
 from jobagent.profile.schema import MasterProfile
 from jobagent.tailor.answers import load_answers_seed
@@ -188,6 +189,45 @@ async def _check_current_employment(scope) -> None:  # type: ignore[no-untyped-d
             continue
 
 
+async def _radio_option_label(scope, m) -> str:  # type: ignore[no-untyped-def]
+    """Resolve the visible text of one radio option.
+
+    Prefers ``<label for=id>`` (the normal case, e.g. Ashby). LinkedIn's
+    radios have no ``<label>`` at all — the "Yes"/"No" text sits on a nearby
+    ancestor DIV with hashed class names, same pattern as its consent
+    checkboxes — so this falls back to walking up to 3 ancestors for the
+    first non-empty text.
+    """
+    try:
+        mid = await m.get_attribute("id") or ""
+        if mid:
+            lb = scope.locator(f"label[for='{mid}']")
+            if await lb.count() > 0:
+                txt = (await lb.first.inner_text()).strip()
+                if txt:
+                    return txt
+    except Exception:
+        pass
+    try:
+        return (
+            await m.evaluate(
+                """e => {
+                    const al = e.getAttribute('aria-label') || '';
+                    if (al) return al;
+                    let n = e.parentElement;
+                    for (let i = 0; i < 3 && n; i++) {
+                        const t = (n.innerText || '').trim();
+                        if (t) return t;
+                        n = n.parentElement;
+                    }
+                    return '';
+                }"""
+            )
+        ).strip()
+    except Exception:
+        return ""
+
+
 async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-untyped-def]
     """Return the visible, empty, required custom controls on the form."""
     fields: list[_Field] = []
@@ -331,12 +371,19 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
     # Ashby renders "willing to relocate?" style questions as a radio group
     # (yes / no / already there). The engine ignored them, leaving a required
     # question blank while every text field looked correct.
+    # NOTE: do NOT require is_visible() — LinkedIn styles its radio groups by
+    # hiding the native <input> (zero-size, offscreen) and drawing a fake
+    # circle via CSS on a sibling element. A visibility gate here silently
+    # dropped every required Yes/No question ("Are you legally authorized to
+    # work in...?", "Will you require sponsorship...?") from discovery, so
+    # the engine reported zero unresolved questions while LinkedIn still
+    # showed "This field is required" and blocked Submit. See is_present().
     radios = scope.locator("input[type=radio]")
     groups: dict[str, list] = {}
     for i in range(await radios.count()):
         r = radios.nth(i)
         try:
-            if not await r.is_visible():
+            if not await is_present(r):
                 continue
             name = await r.get_attribute("name") or ""
             if not name:
@@ -384,7 +431,7 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
                 ):
                     try:
                         if not await members[0].is_checked():
-                            await members[0].check(timeout=4000)
+                            await click_hidden_checkable(members[0], scope)
                             log.debug(
                                 "question_engine.consent_radio_checked", name=name[:40]
                             )
@@ -419,14 +466,13 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
                                 )
                             ).strip().lower()
                         if label.startswith("yes") or "yes" == label[:3]:
-                            await m.check(timeout=4000)
-                            chosen = True
+                            chosen = await click_hidden_checkable(m, scope)
                             break
                     except Exception:
                         continue
                 if not chosen and members:
                     try:
-                        await members[0].check(timeout=4000)
+                        await click_hidden_checkable(members[0], scope)
                     except Exception:
                         pass
                 log.debug("question_engine.consent_pair_answered", name=name[:40])
@@ -434,13 +480,7 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
             options: list[str] = []
             for m in members:
                 try:
-                    mid = await m.get_attribute("id") or ""
-                    txt = ""
-                    if mid:
-                        lb = scope.locator(f"label[for='{mid}']")
-                        if await lb.count() > 0:
-                            txt = (await lb.first.inner_text()).strip()
-                    options.append(txt)
+                    options.append(await _radio_option_label(scope, m))
                 except Exception:
                     options.append("")
             field_id = f"radio:{name}"
@@ -999,6 +1039,53 @@ async def _fill_field(scope, frame, field: _Field, answer: str) -> bool:  # type
                 await target.press("Tab", timeout=2000)
             except Exception:
                 pass
+
+            # Some fields validate client-side with "Invalid input"/"Invalid
+            # format" even though the HTML input type is plain "text" — e.g.
+            # LinkedIn's India CTC questions reject "44.2 LPA" even though
+            # the HTML5 number/tel check above only fires for type=number.
+            # If a nearby element now shows that message AND the typed value
+            # has non-numeric characters, strip to the bare number and retry
+            # once before giving up.
+            if re.search(r"[a-zA-Z]", value):
+                try:
+                    flagged = await target.evaluate(
+                        """e => {
+                            let n = e.parentElement;
+                            for (let i = 0; i < 4 && n; i++) {
+                                const t = (n.innerText || '').toLowerCase();
+                                if (t.includes('invalid input')
+                                    || t.includes('invalid format')) {
+                                    return true;
+                                }
+                                n = n.parentElement;
+                            }
+                            return false;
+                        }"""
+                    )
+                except Exception:
+                    flagged = False
+                if flagged:
+                    m = re.search(r"-?\d+(?:[.,]\d+)?", value)
+                    if m:
+                        numeric_value = m.group(0).replace(",", "")
+                        if is_textarea:
+                            await target.fill(numeric_value, timeout=8000)
+                        else:
+                            await target.click(timeout=3000)
+                            await target.fill("", timeout=3000)
+                            await target.type(numeric_value, delay=25, timeout=15000)
+                        try:
+                            await target.press("Tab", timeout=2000)
+                        except Exception:
+                            pass
+                        log.debug(
+                            "question_engine.numeric_retry",
+                            field_id=field.field_id,
+                            original=value[:30],
+                            retried=numeric_value,
+                        )
+
             return bool((await target.input_value() or "").strip())
 
         if field.kind == "select":
@@ -1018,17 +1105,11 @@ async def _fill_field(scope, frame, field: _Field, answer: str) -> bool:  # type
             for i in range(await members.count()):
                 m = members.nth(i)
                 try:
-                    mid = await m.get_attribute("id") or ""
-                    label = ""
-                    if mid:
-                        lb = scope.locator(f"label[for='{mid}']")
-                        if await lb.count() > 0:
-                            label = (await lb.first.inner_text()).strip().lower()
+                    label = (await _radio_option_label(scope, m)).lower()
                     if not label:
                         continue
                     if label == target_text or target_text in label or label in target_text:
-                        await m.check(timeout=5000)
-                        return await m.is_checked()
+                        return await click_hidden_checkable(m, scope)
                 except Exception:
                     continue
             return False

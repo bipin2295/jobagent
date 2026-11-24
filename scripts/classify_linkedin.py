@@ -54,8 +54,16 @@ async def _classify(page, url: str) -> str:  # type: ignore[no-untyped-def]
         return UNKNOWN
     await asyncio.sleep(2.5)
 
+    # NOTE: do not slice this. The job-details panel sits after a nav bar,
+    # a sidebar, and (on many postings) several "recommended jobs" cards —
+    # each one its own "<company> ... Promoted · N days ago ... Apply" block.
+    # A [:4000]/[:5000] cutoff frequently truncated BEFORE the one phrase
+    # that disambiguates the state ("Responses managed off LinkedIn"),
+    # which silently turned real linkedin_form/external verdicts into
+    # "unknown". Full body text for a job page is a few KB; the cost of not
+    # slicing is negligible.
     try:
-        body = (await page.inner_text("body"))[:4000].lower()
+        body = (await page.inner_text("body")).lower()
     except Exception:
         body = ""
 
@@ -66,6 +74,8 @@ async def _classify(page, url: str) -> str:  # type: ignore[no-untyped-def]
         "not currently accepting applications" in body
         or "no longer accepting applications" in body
     ):
+        return CLOSED
+    if "job id provided may not be valid" in body or "unable to load the page" in body:
         return CLOSED
 
     # Lazy rendering: buttons can sit below the fold.
@@ -82,7 +92,7 @@ async def _classify(page, url: str) -> str:  # type: ignore[no-untyped-def]
         await asyncio.sleep(1.2)
 
     try:
-        body = (await page.inner_text("body"))[:5000].lower()
+        body = (await page.inner_text("body")).lower()
     except Exception:
         return UNKNOWN
 
