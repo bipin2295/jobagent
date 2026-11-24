@@ -603,7 +603,16 @@ def discover_cmd(
     else:
         from jobagent.apply.guardrails import load_guardrails  # noqa: PLC0415
         g = load_guardrails()
-        only_sources = g.active_ats if g.active_ats else None
+        only_sources = list(g.active_ats) if g.active_ats else None
+        # "linkedin" in active_ats describes the APPLY handler, not a
+        # discovery collector — the collector that actually performs a fresh
+        # LinkedIn search is registered as "jobspy" (it covers LinkedIn,
+        # Indeed, and Glassdoor in one scrape). Without this, active_ats
+        # discovery runs never collect fresh LinkedIn postings at all; every
+        # "linkedin" job comes from stale Adzuna/Jooble aggregator links
+        # re-tagged after the fact.
+        if only_sources and "linkedin" in only_sources and "jobspy" not in only_sources:
+            only_sources.append("jobspy")
         if only_sources:
             console.print(f"[dim]ATS focus (from guardrails.yaml): [bold]{', '.join(only_sources)}[/bold]. "
                           f"Pass [bold]--sources all[/bold] to override.[/dim]")

@@ -171,6 +171,21 @@ async def main() -> None:
             s.commit()
         print(f"retired {len(external_ids)} external postings (filtered_out)")
 
+    # linkedin_form postings are live but not automatable by any current
+    # handler (no modal, no exposed ATS URL). Leaving them queued means every
+    # future run re-visits the same unresolvable postings forever, since they
+    # sort highest by score and never change state. Retire them the same way
+    # as external.
+    if form_ids:
+        with get_session() as s:
+            for jid in form_ids:
+                j = s.get(Job, jid)
+                if j and j.status == "queued":
+                    j.status = "filtered_out"
+                    s.add(j)
+            s.commit()
+        print(f"retired {len(form_ids)} linkedin_form postings (filtered_out)")
+
     # Already-applied postings: mark the job applied so the pipeline stops
     # considering them. This is how LinkedIn reports a job you applied to
     # outside the agent (or before a DB reset).

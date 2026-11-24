@@ -186,6 +186,14 @@ def _row_to_raw_job(row: Any, pd: Any, search_location: str) -> RawJob | None:
 
 
 class JobSpyCollector(CollectorBase):
+    # ``name`` (not just ``source``) must be set: _load_collectors' --sources
+    # filter and discover_cmd's active_ats fallback both match on
+    # ``instance.name``. Leaving it at the base class default ("") meant
+    # `--sources jobspy` silently matched zero collectors and `discover`
+    # never ran the only collector that performs a fresh LinkedIn/Indeed/
+    # Glassdoor search — every "linkedin" job in the DB came exclusively
+    # from stale aggregator feeds (Adzuna/Jooble) re-tagged after the fact.
+    name = "jobspy"
     source = "jobspy"
 
     async def fetch(self, search_cfg: dict[str, Any]) -> list[RawJob]:
