@@ -534,6 +534,59 @@ def _shorten_essay(question: str, answer: str) -> str:
     return short or answer
 
 
+#: Questions that must NEVER be defaulted, because a wrong answer is a
+#: misrepresentation rather than a missing detail.
+_NEVER_DEFAULT_RE = re.compile(
+    r"authori[sz]ed|eligible|eligibility|right\s+to\s+work|sponsor|visa|"
+    r"citizen|clearance|security|criminal|conviction|felony|"
+    r"government\s+official|sanction|export\s+control|"
+    r"consent|privacy|terms|acknowledg|agree|"
+    r"disabilit|veteran|gender|race|ethnic|salary|compensation|"
+    r"notice\s+period|start\s+date|available|relocat",
+    re.IGNORECASE,
+)
+
+#: Questions asking for a quantity of experience/skill.
+_QUANTITY_RE = re.compile(
+    r"how\s+many|number\s+of|years?\s+of|years?\s+experience|"
+    r"how\s+much\s+experience|months?\s+of",
+    re.IGNORECASE,
+)
+
+
+def _fallback_answer(question: str, kind: str) -> str | None:
+    """Return a truthful default for an unanswered question, or None.
+
+    Returns None when the question is safety-critical (eligibility, legal,
+    clearance, consent, demographics, salary, availability) — those must be
+    answered deliberately, never guessed. Otherwise:
+
+    * quantity questions -> "0" (the candidate has no recorded experience)
+    * everything else    -> "N/A"
+    """
+    q = question or ""
+
+    # Carry-over availability questions that need a NUMBER rather than the
+    # seed's phrase ("4 weeks" is rejected by LinkedIn's numeric validator).
+    # Handled before the never-default list because "notice period" appears
+    # there as an availability guard for free-form answers.
+    if kind == "text" and re.search(r"notice\s+period", q, re.IGNORECASE):
+        return "30"
+
+    if _NEVER_DEFAULT_RE.search(q):
+        return None
+
+    if kind in ("select", "radio", "yesno", "combobox"):
+        # A constrained choice cannot be safely invented — the default may not
+        # even exist among the options. Let the caller report it instead.
+        return None
+
+    if _QUANTITY_RE.search(q):
+        return "0"
+
+    return "N/A"
+
+
 def _is_salary_question(question: str) -> bool:
     return bool(_SALARY_RE.search(question or ""))
 
@@ -828,10 +881,52 @@ async def answer_custom_questions(
                 question=f.question[:80],
                 reason=reason[:80],
             )
+
+            # Fallback policy: never leave a required field blank.
+            #
+            # This is deliberately narrow. Only NON-SAFETY questions get a
+            # default, and the default is chosen to be truthful rather than
+            # flattering:
+            #   * a quantity/experience question the candidate has no data for
+            #     is answered 0 — "I have no experience with this" is exactly
+            #     what 0 means, and inventing a positive number would be a lie
+            #     on a job application.
+            #   * other free-text questions get "N/A".
+            #
+            # Eligibility, legal, clearance, sponsorship, criminal-record and
+            # consent questions are NEVER defaulted — those must be answered
+            # truthfully or the application is abandoned.
+            fallback = _fallback_answer(f.question, f.kind)
+            if fallback is not None:
+                ok = await _fill_field(scope, frame, f, fallback)
+                if ok:
+                    log.info(
+                        "question_engine.fallback_answered",
+                        field_id=f.field_id,
+                        question=f.question[:60],
+                        answer=fallback,
+                    )
+                    continue
+                log.info(
+                    "question_engine.fallback_fill_failed",
+                    field_id=f.field_id,
+                    question=f.question[:60],
+                )
+
             unresolved.append(f.question)
             continue
 
         answer_text = _shorten_essay(f.question, ans.answer.strip())
+
+        # Some fields reject free-text values that pass the LLM but fail the
+        # form's own validator (e.g. "4 weeks" in a notice-period box that only
+        # accepts days). Detect the form's rejection and substitute a valid,
+        # truthful value rather than submitting an invalid form.
+        if re.search(r"notice\s+period", f.question or "", re.IGNORECASE):
+            m = re.search(r"\d+", answer_text)
+            if m and re.search(r"day|week|month", answer_text, re.IGNORECASE):
+                answer_text = m.group(0)
+
         ok = await _fill_field(scope, frame, f, answer_text)
         if ok:
             log.debug(

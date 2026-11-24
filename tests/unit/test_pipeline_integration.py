@@ -302,14 +302,23 @@ class TestApplyOrchestrator:
         from jobagent.db.models import Job
 
         handlers = _load_handlers()
+        # A genuinely unsupported ATS still has no handler.
         job = Job(
+            source="taleo", source_job_id="tl-001",
+            url="https://taleo.example.com/jobs/123",
+            title="SDE", title_norm="sde",
+            ats_type="taleo", content_hash="tl-hash",
+        )
+        assert _select_handler(job, handlers) is None
+
+        # linkedin DOES have a handler now (Easy Apply).
+        li = Job(
             source="linkedin", source_job_id="li-001",
             url="https://linkedin.com/jobs/view/123",
             title="SDE", title_norm="sde",
             ats_type="linkedin", content_hash="li-hash",
         )
-        h = _select_handler(job, handlers)
-        assert h is None
+        assert _select_handler(li, handlers) is not None
 
     def test_run_apply_shadow_mode_no_browser(self, tmp_db):
         """In shadow mode with no Playwright, run_apply must not crash."""

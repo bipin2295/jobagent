@@ -170,6 +170,11 @@ def _load_handlers() -> list[ApplyHandlerBase]:
         handlers.append(JoinComHandler())
     except ImportError:
         pass
+    try:
+        from jobagent.apply.handlers.linkedin import LinkedInHandler
+        handlers.append(LinkedInHandler())
+    except ImportError:
+        pass
     return handlers
 
 
