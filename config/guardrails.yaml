@@ -36,8 +36,8 @@ auth_assist:
   timeout_minutes: 10           # give up and skip if you don't respond
 
 pacing:
-  min_seconds: 5     # reduced for testing; set back to 45 for production
-  max_seconds: 15    # reduced for testing; set back to 180 for production
+  min_seconds: 45    # production pacing (LinkedIn/ATS bot detection)
+  max_seconds: 180   # production pacing
   max_parallel_browsers: 3
   active_hours:
     start: 8

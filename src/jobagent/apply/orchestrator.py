@@ -254,6 +254,20 @@ def _update_app_status(app_id: int, status: str, result: ApplyResult) -> None:
                 job.status = "applied"
                 session.add(job)
 
+            # Record the submission time and the ATS channel. Both are what
+            # check_daily_cap() counts; leaving them NULL meant the global and
+            # per-channel daily caps could never be reached, so no cap was
+            # actually enforced.
+            if app.submitted_at is None:
+                app.submitted_at = datetime.now(timezone.utc)
+            if job is not None and job.ats_type:
+                app.channel = (
+                    "linkedin_easy_apply"
+                    if job.ats_type == "linkedin"
+                    else job.ats_type
+                )
+            session.add(app)
+
         event = AppEvent(
             application_id=app_id,
             ts=datetime.now(timezone.utc),
@@ -377,6 +391,18 @@ async def run_apply(
         log.info("apply.daily_cap_reached", reason=cap_reason)
         return 0, 0, 0
 
+    # Per-ATS caps (e.g. linkedin_easy_apply). Checked up-front AND before each
+    # individual submission below, because a run can otherwise blow past a
+    # channel cap in a single batch.
+    def _channel_cap_ok(ats: str | None) -> bool:
+        channel = (
+            "linkedin_easy_apply" if ats == "linkedin" else (ats or "default")
+        )
+        ok, reason = check_daily_cap(channel)
+        if not ok:
+            log.info("apply.channel_cap_reached", channel=channel, reason=reason)
+        return ok
+
     with get_session() as session:
         pairs = _get_tailored_applications(session, limit, visa_confirmed=visa_confirmed)
 
@@ -431,6 +457,18 @@ async def run_apply(
                     status="skipped", error=cool_reason,
                 ))
                 continue
+
+            # Per-ATS daily cap. Checked here (not only at run start) so a batch
+            # cannot exceed a channel cap such as linkedin_easy_apply: 15.
+            # Stop the run when reached; remaining jobs stay 'tailored' so they
+            # are picked up by tomorrow's run rather than being marked skipped.
+            if not _channel_cap_ok(job.ats_type):
+                log.info(
+                    "apply.stopping_channel_cap",
+                    job_id=job.id,
+                    ats=job.ats_type,
+                )
+                break
 
             # Resolve ATS for aggregator URLs via redirect-following
             if not job.ats_type or job.ats_type == "unknown":
