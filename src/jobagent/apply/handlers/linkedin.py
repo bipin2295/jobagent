@@ -170,14 +170,30 @@ class LinkedInHandler(ApplyHandlerBase):
                 if btn is None:
                     await page.screenshot(path=str(shot_dir / "step_no_easy_apply.png"))
                     try:
-                        body = (await page.inner_text("body"))[:3000].lower()
+                        body = (await page.inner_text("body"))[:4000].lower()
                     except Exception:
                         body = ""
-                    if "apply on company" in body or "company website" in body:
+                    # Distinguish the real states. "No Easy Apply button" alone is
+                    # misleading: most postings DO have an Apply control, it just
+                    # is not the in-LinkedIn modal this handler can drive.
+                    if "application submitted" in body or "you applied" in body:
+                        reason = "Already applied to this posting."
+                    elif (
+                        "not currently accepting applications" in body
+                        or "no longer accepting applications" in body
+                    ):
+                        reason = "Posting is closed — not accepting applications."
+                    elif "apply on company" in body or "company website" in body:
                         reason = "External application (Apply on company website)."
+                    elif "responses managed off linkedin" in body:
+                        reason = (
+                            "LinkedIn-hosted form with responses managed off "
+                            "LinkedIn — not an Easy Apply modal, and the "
+                            "destination ATS is not exposed."
+                        )
                     else:
                         reason = "No Easy Apply button found on this posting."
-                    log.info("linkedin.no_easy_apply", job_id=job.id, reason=reason[:60])
+                    log.info("linkedin.no_easy_apply", job_id=job.id, reason=reason[:70])
                     return ApplyResult(
                         success=False,
                         application_id=app.id,
@@ -270,6 +286,26 @@ class LinkedInHandler(ApplyHandlerBase):
                     await page.screenshot(
                         path=str(shot_dir / f"step_modal_{step:02d}.png")
                     )
+
+                    # Consent / privacy checkboxes. LinkedIn's Easy Apply hides
+                    # these on later pages, often in the posting's language
+                    # (e.g. French "J'accepte"). Without ticking them the form
+                    # shows "This field is required" and Submit never appears.
+                    try:
+                        from jobagent.apply.form_utils import (  # noqa: PLC0415
+                            check_consent_checkboxes,
+                        )
+
+                        ticked = await check_consent_checkboxes(page)
+                        if ticked:
+                            log.debug(
+                                "linkedin.consent_checked",
+                                job_id=job.id,
+                                step=step,
+                                count=ticked,
+                            )
+                    except Exception:
+                        pass
 
                     # Final step: LinkedIn labels it "Submit application".
                     submit = page.locator(

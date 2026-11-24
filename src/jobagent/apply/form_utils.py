@@ -389,3 +389,117 @@ async def visible_captcha(page: Any) -> bool:  # noqa: ANN401
             except Exception:
                 continue
     return False
+
+
+#: Consent wording across the languages these boards actually use.
+_CONSENT_WORDS = (
+    "accept", "agree", "consent", "privacy", "terms", "acknowledge", "confirm",
+    "j'accepte", "j’accepte", "accepte", "acceptez", "confidentialité",
+    "akzeptiere", "zustimme", "datenschutz", "acepto", "aceitar", "privacybeleid",
+)
+
+
+async def check_consent_checkboxes(page: Any) -> int:  # noqa: ANN401
+    """Tick required consent/privacy checkboxes and return how many were ticked.
+
+    Multi-step ATS forms (LinkedIn Easy Apply, join.com, Workday) put a consent
+    or privacy checkbox on a late page, frequently in the posting's language.
+    Until it is ticked the form reports "This field is required" and the final
+    Submit control never renders — which looks like a broken handler rather than
+    an unanswered question.
+
+    Only checkboxes that are ``required`` or whose label reads like consent are
+    touched; marketing/newsletter opt-ins are left alone.
+    """
+    ticked = 0
+    try:
+        boxes = page.locator("input[type='checkbox']")
+        count = await boxes.count()
+    except Exception:
+        return 0
+
+    for i in range(count):
+        box = boxes.nth(i)
+        try:
+            if await box.is_checked():
+                continue
+            # NOTE: do NOT require the INPUT to be visible. Styled checkboxes
+            # (LinkedIn, Chakra, MUI) hide the real <input> and draw a fake box
+            # via CSS; the input is still the element that holds state and its
+            # label is what a human clicks. Requiring visibility skipped every
+            # consent box on LinkedIn and the form then refused to submit.
+            in_dom = await box.evaluate("e => e.offsetParent !== null || !!e.getClientRects().length")
+            if not in_dom:
+                continue
+            required = await box.evaluate("e => !!e.required")
+            label = ""
+            try:
+                # LinkedIn (and similar obfuscated UIs) attach no <label>, put
+                # no aria-label on the input, and render the text on a
+                # grandparent DIV with hashed class names. Walk the ancestor
+                # chain and take the first non-empty innerText; also fall back
+                # to aria-label and the placeholder-style "value" attribute.
+                label = await box.evaluate(
+                    """e => {
+                        const al = e.getAttribute('aria-label') || '';
+                        if (al) return al;
+                        const lv = (e.labels && e.labels[0])
+                            ? e.labels[0].innerText : '';
+                        if (lv) return lv;
+                        const cl = e.closest('label');
+                        if (cl) return cl.innerText || '';
+                        let n = e.parentElement;
+                        for (let i = 0; i < 4 && n; i++) {
+                            const t = (n.innerText || '').trim();
+                            if (t) return t;
+                            n = n.parentElement;
+                        }
+                        return '';
+                    }"""
+                )
+            except Exception:
+                label = ""
+            low = (label or "").lower()
+            if not required and not any(w in low for w in _CONSENT_WORDS):
+                continue
+            # Never auto-accept marketing/newsletter opt-ins.
+            if any(w in low for w in ("newsletter", "marketing", "offers", "promotions")):
+                continue
+
+            # Click strategy for styled/hidden checkboxes. Playwright's
+            # check() fails with "outside of the viewport" because LinkedIn's
+            # modal does not scroll the hidden input into view, and the input
+            # has a zero-size bounding box. A DOM-level click() fires the
+            # React handler directly and works reliably.
+            clicked = False
+            try:
+                await box.evaluate("e => e.click()")
+                await asyncio.sleep(0.4)
+                clicked = await box.is_checked()
+            except Exception:
+                clicked = False
+            if not clicked:
+                try:
+                    await box.check(timeout=4000, force=True)
+                    clicked = await box.is_checked()
+                except Exception:
+                    clicked = False
+            if not clicked:
+                try:
+                    bb = await box.bounding_box()
+                    if bb:
+                        await page.mouse.click(
+                            bb["x"] + bb["width"] / 2,
+                            bb["y"] + bb["height"] / 2,
+                        )
+                        await asyncio.sleep(0.4)
+                        clicked = await box.is_checked()
+                except Exception:
+                    clicked = False
+
+            if clicked:
+                ticked += 1
+                log.debug("form_utils.consent_ticked", label=(label or "")[:60])
+        except Exception:
+            continue
+    return ticked
