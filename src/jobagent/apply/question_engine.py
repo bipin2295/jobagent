@@ -399,6 +399,16 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
 
     for name, members in groups.items():
         try:
+            # Resume/file pickers render as a radio group too (one option per
+            # cached PDF, sometimes dozens from previous applications) and are
+            # handled separately by upload_resume — never as a custom
+            # question. If discovery runs before one is auto-selected, the
+            # group-question-text fallback below can grab a stray word like
+            # "PDF" from the picker's heading and treat it as an unanswerable
+            # required question. A real Yes/No/select-style question never
+            # has this many options, so skip large groups outright.
+            if len(members) > 6:
+                continue
             checked = any([await m.is_checked() for m in members])
             if checked:
                 continue
