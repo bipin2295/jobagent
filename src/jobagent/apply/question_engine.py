@@ -212,14 +212,19 @@ async def _radio_option_label(scope, m) -> str:  # type: ignore[no-untyped-def]
         return (
             await m.evaluate(
                 """e => {
-                    const al = e.getAttribute('aria-label') || '';
-                    if (al) return al;
+                    // Ancestor walk BEFORE aria-label: LinkedIn sets the SAME
+                    // aria-label (the group's question, not "Yes"/"No") on
+                    // every option in a radio group, so checking it first
+                    // made every option in a group resolve to identical text
+                    // and the Yes/No match in _fill_field always missed.
                     let n = e.parentElement;
                     for (let i = 0; i < 3 && n; i++) {
                         const t = (n.innerText || '').trim();
                         if (t) return t;
                         n = n.parentElement;
                     }
+                    const al = e.getAttribute('aria-label') || '';
+                    if (al) return al;
                     return '';
                 }"""
             )
@@ -401,11 +406,28 @@ async def _collect_fields(scope, frame) -> list[_Field]:  # type: ignore[no-unty
             question = ""
             try:
                 question = await label_el.evaluate(
-                    "e => { const fs = e.closest('fieldset'); if (fs) { "
-                    "const lg = fs.querySelector('legend'); if (lg) return lg.innerText; } "
-                    "const w = e.closest('[data-field-path]'); "
-                    "if (w) { const l = w.querySelector('label'); if (l) return l.innerText; } "
-                    "return ''; }"
+                    """e => {
+                        const fs = e.closest('fieldset');
+                        if (fs) {
+                            const lg = fs.querySelector('legend');
+                            if (lg) return lg.innerText;
+                            // LinkedIn renders role="radiogroup" fieldsets with
+                            // no <legend> at all. The question text is a
+                            // sibling of the fieldset, inside its parent, as
+                            // "Question?\\n\\nYes\\n\\nNo" — grabbing fs's own
+                            // innerText only yields the option labels, so step
+                            // up one level and take the first paragraph.
+                            const parent = fs.parentElement;
+                            if (parent) {
+                                const full = (parent.innerText || '').trim();
+                                const first = full.split(/\\n\\s*\\n/)[0];
+                                if (first && first.trim()) return first.trim();
+                            }
+                        }
+                        const w = e.closest('[data-field-path]');
+                        if (w) { const l = w.querySelector('label'); if (l) return l.innerText; }
+                        return '';
+                    }"""
                 )
             except Exception:
                 question = ""
